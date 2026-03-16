@@ -1,0 +1,225 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  SA_SE
+  VIEWER
+}
+
+enum DomainStatus {
+  CONNECTED
+  DISCONNECTED
+  INVALID
+  VALIDATING
+}
+
+enum PdResourceType {
+  BUSINESS_SERVICE
+  ESCALATION_POLICY
+  RULESET
+  SCHEDULE
+  SERVICE
+  TEAM
+  USER
+}
+
+enum ConfigSnapshotStatus {
+  PENDING
+  RUNNING
+  COMPLETED
+  FAILED
+}
+
+enum EvaluationStatus {
+  PENDING
+  CONFIG_EXPORT
+  INCIDENT_PULL
+  ANALYZING
+  COMPLETED
+  FAILED
+  CANCELLED
+}
+
+enum ScopeType {
+  TEAM
+  SERVICE
+}
+
+enum ConversionStatus {
+  AUTO
+  MANUAL
+  SKIP
+  UNSUPPORTED
+}
+
+model User {
+  id        String   @id @default(cuid())
+  email     String   @unique
+  name      String
+  role      UserRole
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  customersCreated Customer[]
+  evaluations      Evaluation[]
+  auditLogs        AuditLog[]
+
+  @@map("users")
+}
+
+model Customer {
+  id                  String   @id @default(cuid())
+  name                String
+  industry            String?
+  pdContractRenewal   DateTime?
+  notes               String?
+  createdById         String
+  createdAt           DateTime @default(now())
+  updatedAt           DateTime @updatedAt
+
+  createdBy User     @relation(fields: [createdById], references: [id])
+  pdDomains PdDomain[]
+
+  @@map("customers")
+}
+
+model PdDomain {
+  id            String         @id @default(cuid())
+  customerId    String
+  subdomain     String
+  apiTokenEnc   Bytes
+  tokenLast4    String
+  connectedAt   DateTime       @default(now())
+  lastValidated DateTime?
+  status        DomainStatus   @default(VALIDATING)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  customer          Customer             @relation(fields: [customerId], references: [id], onDelete: Cascade)
+  configSnapshots   ConfigSnapshot[]
+  evaluations       Evaluation[]
+
+  @@unique([customerId, subdomain])
+  @@map("pd_domains")
+}
+
+model ConfigSnapshot {
+  id             String                 @id @default(cuid())
+  domainId       String
+  capturedAt     DateTime
+  terraformState Bytes
+  resourcesJson  Bytes
+  resourceCounts Json
+  staleResources Json?
+  status         ConfigSnapshotStatus   @default(PENDING)
+  createdAt      DateTime               @default(now())
+
+  domain       PdDomain      @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  resources    PdResource[]
+  evaluations  Evaluation[]
+
+  @@map("config_snapshots")
+}
+
+model PdResource {
+  id           String         @id @default(cuid())
+  snapshotId   String
+  pdType       PdResourceType
+  pdId         String
+  name         String
+  teamIds      String[]
+  configJson   Bytes
+  isStale      Boolean        @default(false)
+  lastActivity DateTime?
+  dependencies String[]
+
+  snapshot         ConfigSnapshot     @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  migrationMappings MigrationMapping[]
+
+  @@unique([snapshotId, pdId])
+  @@map("pd_resources")
+}
+
+model Evaluation {
+  id                String             @id @default(cuid())
+  domainId          String
+  createdById       String
+  status            EvaluationStatus   @default(PENDING)
+  configSnapshotId  String?
+  scopeType         ScopeType
+  scopeIds          String[]
+  startedAt         DateTime?
+  completedAt       DateTime?
+  createdAt         DateTime           @default(now())
+  updatedAt         DateTime           @updatedAt
+
+  domain                PdDomain               @relation(fields: [domainId], references: [id], onDelete: Cascade)
+  createdBy             User                   @relation(fields: [createdById], references: [id])
+  configSnapshot        ConfigSnapshot?        @relation(fields: [configSnapshotId], references: [id], onDelete: SetNull)
+  incidentAnalyses      IncidentAnalysis[]
+  migrationMappings     MigrationMapping[]
+
+  @@map("evaluations")
+}
+
+model IncidentAnalysis {
+  id            String   @id @default(cuid())
+  evaluationId  String
+  serviceId     String?
+  teamId        String?
+  periodStart   DateTime
+  periodEnd     DateTime
+  incidentCount Int
+  alertCount    Int
+  noiseRatio    Float
+  mttrP50       Float?
+  mttrP95       Float?
+  sourcesJson   Bytes
+  patternsJson  Bytes
+  shadowSignals String[]
+
+  evaluation Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+
+  @@map("incident_analyses")
+}
+
+model MigrationMapping {
+  id               String            @id @default(cuid())
+  evaluationId     String
+  pdResourceId     String
+  ioResourceType   String?
+  conversionStatus ConversionStatus
+  effortEstimate   String?
+  notes            String?
+  ioTfSnippet      String?
+
+  evaluation Evaluation   @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  pdResource PdResource   @relation(fields: [pdResourceId], references: [id], onDelete: Cascade)
+
+  @@map("migration_mappings")
+}
+
+model AuditLog {
+  id           String   @id @default(cuid())
+  userId       String
+  action       String
+  entityType   String
+  entityId     String
+  metadataJson Json?
+  ipAddress    String?
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("audit_logs")
+}
