@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -21,6 +22,7 @@ export default function DomainConnectForm({
   onSuccess,
   onCancel,
 }: DomainConnectFormProps) {
+  const router = useRouter();
   const [currentStep, setCurrentStep] = useState<Step>("subdomain");
   const [subdomain, setSubdomain] = useState("");
   const [apiToken, setApiToken] = useState("");
@@ -54,21 +56,19 @@ export default function DomainConnectForm({
 
   const handleConnect = async () => {
     try {
-      await connectMutation.mutateAsync({
+      const result = await connectMutation.mutateAsync({
         customerId,
         subdomain: subdomain.trim(),
         apiToken: apiToken.trim(),
       });
 
       toast({
-        title: "Success",
-        description: "Domain connected successfully",
+        title: "Domain connected",
+        description: "Redirecting to domain page — sync config to pull resources",
       });
 
-      setSubdomain("");
-      setApiToken("");
-      setCurrentStep("subdomain");
       onSuccess();
+      router.push(`/domains/${result.id}`);
     } catch (error) {
       toast({
         title: "Error",

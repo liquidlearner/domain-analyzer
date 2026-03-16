@@ -3,7 +3,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { useParams } from "next/navigation";
-import { RefreshCw, Zap } from "lucide-react";
+import { RefreshCw, Zap, Download, Loader2 } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -47,12 +47,12 @@ export default function DomainDetailPage() {
   const { toast } = useToast();
   const [filterType, setFilterType] = useState<ResourceType | "all">("all");
 
-  const { data: domain, isLoading, error } = trpc.domain.getById.useQuery({
+  const { data: domain, isLoading, error, refetch } = trpc.domain.getById.useQuery({
     id: domainId,
   });
 
   const validateMutation = trpc.domain.validateConnection.useMutation();
-  const updateTokenMutation = trpc.domain.updateToken.useMutation();
+  const syncConfigMutation = trpc.domain.syncConfig.useMutation();
 
   const handleValidateConnection = async () => {
     try {
@@ -66,6 +66,24 @@ export default function DomainDetailPage() {
         title: "Error",
         description:
           error instanceof Error ? error.message : "Failed to validate connection",
+        variant: "destructive",
+      });
+    }
+  };
+
+  const handleSyncConfig = async () => {
+    try {
+      const result = await syncConfigMutation.mutateAsync({ domainId });
+      toast({
+        title: "Config synced",
+        description: `Pulled ${Object.values(result.resourceCounts).reduce((a, b) => a + b, 0)} resources from PagerDuty`,
+      });
+      refetch();
+    } catch (error) {
+      toast({
+        title: "Error",
+        description:
+          error instanceof Error ? error.message : "Failed to sync config",
         variant: "destructive",
       });
     }
@@ -106,7 +124,19 @@ export default function DomainDetailPage() {
               disabled={validateMutation.isPending}
             >
               <RefreshCw className="mr-2 h-4 w-4" />
-              Validate Connection
+              Validate
+            </Button>
+            <Button
+              variant="outline"
+              onClick={handleSyncConfig}
+              disabled={syncConfigMutation.isPending}
+            >
+              {syncConfigMutation.isPending ? (
+                <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+              ) : (
+                <Download className="mr-2 h-4 w-4" />
+              )}
+              {syncConfigMutation.isPending ? "Syncing..." : "Sync Config"}
             </Button>
             <Button
               onClick={handleRunAnalysis}
@@ -165,11 +195,18 @@ export default function DomainDetailPage() {
           <CardContent className="pt-6">
             <EmptyState
               title="No configuration captured"
-              description="Run an analysis to capture the current PagerDuty configuration"
+              description="Sync the PagerDuty configuration to see resources, then run an analysis"
               action={
-                <Button onClick={handleRunAnalysis}>
-                  <Zap className="mr-2 h-4 w-4" />
-                  Run First Analysis
+                <Button
+                  onClick={handleSyncConfig}
+                  disabled={syncConfigMutation.isPending}
+                >
+                  {syncConfigMutation.isPending ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <Download className="mr-2 h-4 w-4" />
+                  )}
+                  {syncConfigMutation.isPending ? "Syncing..." : "Sync PagerDuty Config"}
                 </Button>
               }
             />
@@ -216,10 +253,60 @@ export default function DomainDetailPage() {
               </select>
             </CardHeader>
             <CardContent>
-              <div className="text-center py-8 text-zinc-500">
-                <p className="text-sm">Resource inventory data will be displayed here</p>
-                <p className="text-xs mt-2">Configure integration to view detailed resource list</p>
-              </div>
+              {(() => {
+                const allResources = (domain.latestSnapshot?.resources || []) as any[];
+                const filtered = filterType === "all"
+                  ? allResources
+                  : allResources.filter((r: any) => r.pdType === filterType);
+
+                if (filtered.length === 0) {
+                  return (
+                    <div className="text-center py-8 text-zinc-500">
+                      <p className="text-sm">No resources found</p>
+                    </div>
+                  );
+                }
+
+                return (
+                  <div className="overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead>Name</TableHead>
+                          <TableHead>Type</TableHead>
+                          <TableHead>PD ID</TableHead>
+                          <TableHead>Stale</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {filtered.slice(0, 50).map((resource: any) => (
+                          <TableRow key={resource.id}>
+                            <TableCell className="font-medium">{resource.name}</TableCell>
+                            <TableCell>
+                              <Badge variant="outline">
+                                {RESOURCE_TYPE_LABELS[resource.pdType as ResourceType] || resource.pdType}
+                              </Badge>
+                            </TableCell>
+                            <TableCell className="font-mono text-xs text-zinc-500">
+                              {resource.pdId}
+                            </TableCell>
+                            <TableCell>
+                              {resource.isStale && (
+                                <Badge variant="secondary">Stale</Badge>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                    {filtered.length > 50 && (
+                      <p className="text-xs text-zinc-500 text-center mt-2">
+                        Showing 50 of {filtered.length} resources
+                      </p>
+                    )}
+                  </div>
+                );
+              })()}
             </CardContent>
           </Card>
 

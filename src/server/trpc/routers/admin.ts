@@ -22,8 +22,8 @@ const listAuditLogsInput = z.object({
   action: z.string().optional(),
   entityType: z.string().optional(),
   userId: z.string().optional(),
-  startDate: z.string().datetime().optional(),
-  endDate: z.string().datetime().optional(),
+  startDate: z.string().optional(),
+  endDate: z.string().optional(),
 })
 
 export const adminRouter = router({

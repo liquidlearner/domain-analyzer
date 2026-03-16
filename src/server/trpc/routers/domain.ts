@@ -406,6 +406,256 @@ export const domainRouter = router({
     }),
 
   /**
+   * Sync PagerDuty config: pull all resources and create a config snapshot.
+   * Runs synchronously (no Inngest required).
+   */
+  syncConfig: seProcedure
+    .input(
+      z.object({
+        domainId: z.string().min(1),
+      })
+    )
+    .mutation(async ({ ctx, input }) => {
+      const { domainId } = input;
+
+      const domain = await ctx.prisma.pdDomain.findUnique({
+        where: { id: domainId },
+        include: { customer: true },
+      });
+
+      if (!domain) {
+        throw new TRPCError({
+          code: "NOT_FOUND",
+          message: "Domain not found",
+        });
+      }
+
+      if (
+        ctx.user.role !== "ADMIN" &&
+        domain.customer.createdById !== ctx.user.id
+      ) {
+        throw new TRPCError({
+          code: "FORBIDDEN",
+          message: "You do not have permission to sync this domain",
+        });
+      }
+
+      const token = decryptToken(domain.apiTokenEnc);
+      const pdClient = new PagerDutyClient({
+        token,
+        subdomain: domain.subdomain,
+      });
+
+      // Validate token first
+      const validation = await pdClient.validateToken();
+      if (!validation.valid) {
+        await ctx.prisma.pdDomain.update({
+          where: { id: domainId },
+          data: { status: "INVALID" },
+        });
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message: `Token validation failed: ${validation.error}`,
+        });
+      }
+
+      // Pull all resource types from PD
+      const [services, teams, schedules, escalationPolicies, users, businessServices, rulesets] =
+        await Promise.all([
+          pdClient.listServices(),
+          pdClient.listTeams(),
+          pdClient.listSchedules(),
+          pdClient.listEscalationPolicies(),
+          pdClient.listUsers(),
+          pdClient.listBusinessServices(),
+          pdClient.getRulesets(),
+        ]);
+
+      // Check for recent incidents to flag stale services
+      const ninetyDaysAgo = new Date();
+      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
+      const serviceIds = services.map((s) => s.id);
+      let incidents: any[] = [];
+      if (serviceIds.length > 0) {
+        incidents = await pdClient.listIncidents({
+          serviceIds,
+          since: ninetyDaysAgo.toISOString(),
+          until: new Date().toISOString(),
+        });
+      }
+      const servicesWithIncidents = new Set(
+        incidents.map((i: any) => i.service?.id).filter(Boolean)
+      );
+
+      // Build resource records
+      type ResourceEntry = {
+        pdId: string;
+        type: string;
+        name: string;
+        teamIds: string[];
+        dependencies: string[];
+        isStale: boolean;
+      };
+      const resources: Record<string, ResourceEntry> = {};
+
+      for (const s of services) {
+        resources[s.id] = {
+          pdId: s.id,
+          type: "SERVICE",
+          name: s.name || "",
+          teamIds: s.teams?.map((t) => t.id) || [],
+          dependencies: s.escalation_policy?.id ? [s.escalation_policy.id] : [],
+          isStale: !servicesWithIncidents.has(s.id),
+        };
+      }
+      for (const t of teams) {
+        resources[t.id] = {
+          pdId: t.id,
+          type: "TEAM",
+          name: t.name || "",
+          teamIds: [t.id],
+          dependencies: [],
+          isStale: false,
+        };
+      }
+      for (const sch of schedules) {
+        resources[sch.id] = {
+          pdId: sch.id,
+          type: "SCHEDULE",
+          name: sch.name || "",
+          teamIds: [],
+          dependencies: [],
+          isStale: false,
+        };
+      }
+      for (const ep of escalationPolicies) {
+        const deps: string[] = [];
+        if (ep.escalation_rules) {
+          for (const rule of ep.escalation_rules) {
+            if (rule.targets) {
+              for (const target of rule.targets) {
+                if (target.type === "schedule_reference" && target.id) {
+                  deps.push(target.id);
+                }
+              }
+            }
+          }
+        }
+        resources[ep.id] = {
+          pdId: ep.id,
+          type: "ESCALATION_POLICY",
+          name: ep.name || "",
+          teamIds: [],
+          dependencies: deps,
+          isStale: false,
+        };
+      }
+      for (const u of users) {
+        resources[u.id] = {
+          pdId: u.id,
+          type: "USER",
+          name: u.name || "",
+          teamIds: (u as any).teams?.map((t: any) => t.id) || [],
+          dependencies: [],
+          isStale: false,
+        };
+      }
+      for (const bs of businessServices) {
+        resources[bs.id] = {
+          pdId: bs.id,
+          type: "BUSINESS_SERVICE",
+          name: bs.name || "",
+          teamIds: [],
+          dependencies: [],
+          isStale: false,
+        };
+      }
+      for (const rs of rulesets) {
+        resources[rs.id] = {
+          pdId: rs.id,
+          type: "RULESET",
+          name: rs.name || "",
+          teamIds: [],
+          dependencies: [],
+          isStale: false,
+        };
+      }
+
+      // Build resource counts
+      const resourceCounts: Record<string, number> = {
+        SERVICE: services.length,
+        TEAM: teams.length,
+        SCHEDULE: schedules.length,
+        ESCALATION_POLICY: escalationPolicies.length,
+        USER: users.length,
+        BUSINESS_SERVICE: businessServices.length,
+        RULESET: rulesets.length,
+      };
+
+      // Store snapshot
+      const snapshot = await ctx.prisma.configSnapshot.create({
+        data: {
+          domainId,
+          capturedAt: new Date(),
+          terraformState: Buffer.from(JSON.stringify({ placeholder: true })),
+          resourcesJson: Buffer.from(JSON.stringify(resources)),
+          resourceCounts,
+          staleResources: {
+            total: Object.values(resources).filter((r) => r.isStale).length,
+            byType: Object.values(resources)
+              .filter((r) => r.isStale)
+              .reduce(
+                (acc, r) => {
+                  acc[r.type] = (acc[r.type] || 0) + 1;
+                  return acc;
+                },
+                {} as Record<string, number>
+              ),
+          },
+          status: "COMPLETED",
+        },
+      });
+
+      // Create individual PdResource records
+      for (const resource of Object.values(resources)) {
+        await ctx.prisma.pdResource.create({
+          data: {
+            snapshotId: snapshot.id,
+            pdType: resource.type as any,
+            pdId: resource.pdId,
+            name: resource.name,
+            teamIds: resource.teamIds,
+            configJson: Buffer.from(JSON.stringify(resource)),
+            isStale: resource.isStale,
+            dependencies: resource.dependencies,
+          },
+        });
+      }
+
+      // Update domain validation timestamp
+      await ctx.prisma.pdDomain.update({
+        where: { id: domainId },
+        data: { lastValidated: new Date() },
+      });
+
+      await logAudit({
+        userId: ctx.user.id,
+        action: "SYNC_CONFIG",
+        entityType: "PdDomain",
+        entityId: domainId,
+        metadata: {
+          resourceCounts,
+          snapshotId: snapshot.id,
+        },
+      });
+
+      return {
+        snapshotId: snapshot.id,
+        resourceCounts,
+      };
+    }),
+
+  /**
    * Soft delete a domain (disconnect it)
    */
   disconnect: adminProcedure
