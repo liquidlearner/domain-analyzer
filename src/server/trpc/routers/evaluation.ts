@@ -55,11 +55,16 @@ export const evaluationRouter = router({
         },
       })
 
-      // Trigger incident data pull via Inngest
-      await inngest.send({
-        name: 'evaluation/incident-pull.requested',
-        data: { evaluationId: evaluation.id },
-      })
+      // Trigger incident data pull via Inngest (optional — may not be running locally)
+      try {
+        await inngest.send({
+          name: 'evaluation/incident-pull.requested',
+          data: { evaluationId: evaluation.id },
+        })
+      } catch (err) {
+        // Inngest not available — evaluation created but incident pull won't auto-start
+        console.warn('Inngest not available, skipping auto incident pull:', err)
+      }
 
       return evaluation
     }),
@@ -201,11 +206,15 @@ export const evaluationRouter = router({
         data: { status: 'PENDING', startedAt: null, completedAt: null },
       })
 
-      // Re-trigger incident data pull
-      await inngest.send({
-        name: 'evaluation/incident-pull.requested',
-        data: { evaluationId: id },
-      })
+      // Re-trigger incident data pull (optional — Inngest may not be running)
+      try {
+        await inngest.send({
+          name: 'evaluation/incident-pull.requested',
+          data: { evaluationId: id },
+        })
+      } catch (err) {
+        console.warn('Inngest not available, skipping auto incident pull:', err)
+      }
 
       return updated
     }),
