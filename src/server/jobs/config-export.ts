@@ -71,7 +71,7 @@ export const configExport = inngest.createFunction(
         return pdDomain
       })
 
-      const decryptedToken = decryptToken(domain.apiTokenEnc)
+      const decryptedToken = decryptToken(domain.apiTokenEnc as any)
       const pdClient = new PagerDutyClient({
         token: decryptedToken,
         subdomain: domain.subdomain,
@@ -363,7 +363,7 @@ export const configExport = inngest.createFunction(
           await prisma.pdResource.create({
             data: {
               snapshotId: configSnapshot.id,
-              pdType: resource.type,
+              pdType: resource.type as any,
               pdId: resource.pdId,
               name: resource.name,
               teamIds: resource.teamIds,

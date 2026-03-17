@@ -1,8 +1,8 @@
 import { z } from 'zod'
 import { router, protectedProcedure, seProcedure, adminProcedure } from '../trpc'
 import { prisma } from '@/server/db/client'
-import { inngest } from '@/server/jobs/inngest'
 import { TRPCError } from '@trpc/server'
+import { runEvaluationAnalysis } from '@/server/services/evaluation-runner'
 
 // Input validators
 const createEvaluationInput = z.object({
@@ -22,7 +22,7 @@ const listEvaluationsInput = z.object({
 
 export const evaluationRouter = router({
   /**
-   * Create a new evaluation and trigger incident data pull
+   * Create a new evaluation and trigger analysis directly
    */
   create: seProcedure
     .input(createEvaluationInput)
@@ -44,27 +44,22 @@ export const evaluationRouter = router({
         })
       }
 
-      // Create evaluation
+      // Create evaluation with time range
       const evaluation = await prisma.evaluation.create({
         data: {
           domainId,
           createdById: ctx.user.id,
           scopeType,
           scopeIds,
+          timeRangeDays: parseInt(timeRangeDays, 10),
           status: 'PENDING',
         },
       })
 
-      // Trigger incident data pull via Inngest (optional — may not be running locally)
-      try {
-        await inngest.send({
-          name: 'evaluation/incident-pull.requested',
-          data: { evaluationId: evaluation.id },
-        })
-      } catch (err) {
-        // Inngest not available — evaluation created but incident pull won't auto-start
-        console.warn('Inngest not available, skipping auto incident pull:', err)
-      }
+      // Fire-and-forget: start the analysis directly (no Inngest needed)
+      runEvaluationAnalysis(evaluation.id).catch((err) => {
+        console.error('Evaluation analysis failed:', err)
+      })
 
       return evaluation
     }),
@@ -108,7 +103,18 @@ export const evaluationRouter = router({
           createdBy: true,
           configSnapshot: {
             include: {
-              resources: true,
+              resources: {
+                select: {
+                  id: true,
+                  pdType: true,
+                  pdId: true,
+                  name: true,
+                  teamIds: true,
+                  isStale: true,
+                  dependencies: true,
+                  // Omit configJson — it's huge and not needed for display
+                },
+              },
             },
           },
           incidentAnalyses: {
@@ -117,8 +123,13 @@ export const evaluationRouter = router({
           migrationMappings: {
             include: {
               pdResource: {
-                include: {
-                  snapshot: true,
+                select: {
+                  id: true,
+                  pdType: true,
+                  pdId: true,
+                  name: true,
+                  teamIds: true,
+                  // Omit configJson and snapshot — too heavy for listing
                 },
               },
             },
@@ -206,15 +217,10 @@ export const evaluationRouter = router({
         data: { status: 'PENDING', startedAt: null, completedAt: null },
       })
 
-      // Re-trigger incident data pull (optional — Inngest may not be running)
-      try {
-        await inngest.send({
-          name: 'evaluation/incident-pull.requested',
-          data: { evaluationId: id },
-        })
-      } catch (err) {
-        console.warn('Inngest not available, skipping auto incident pull:', err)
-      }
+      // Fire-and-forget: re-run analysis directly
+      runEvaluationAnalysis(id).catch((err) => {
+        console.error('Evaluation retry failed:', err)
+      })
 
       return updated
     }),

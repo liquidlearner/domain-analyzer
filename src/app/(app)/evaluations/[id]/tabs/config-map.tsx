@@ -21,9 +21,9 @@ import {
 interface MigrationMapping {
   id: string;
   conversionStatus: "AUTO" | "MANUAL" | "SKIP" | "UNSUPPORTED";
-  effortEstimate?: string;
-  notes?: string;
-  ioTfSnippet?: string;
+  effortEstimate?: string | null;
+  notes?: string | null;
+  ioTfSnippet?: string | null;
   pdResource: {
     pdType: string;
     name: string;
@@ -31,9 +31,8 @@ interface MigrationMapping {
   };
 }
 
-interface Evaluation {
-  migrationMappings: MigrationMapping[];
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Evaluation = any;
 
 type ConversionStatus = "AUTO" | "MANUAL" | "SKIP" | "UNSUPPORTED";
 type ResourceType = string;
@@ -47,7 +46,7 @@ export default function ConfigMapTab({ evaluation }: ConfigMapTabProps) {
   const [filterType, setFilterType] = useState<ResourceType | "all">("all");
   const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
 
-  const mappings = evaluation.migrationMappings || [];
+  const mappings: MigrationMapping[] = evaluation.migrationMappings || [];
 
   const { filteredMappings, resourceTypes, statusCounts } = useMemo(() => {
     const resourceTypes = new Set(mappings.map((m) => m.pdResource?.pdType).filter(Boolean));

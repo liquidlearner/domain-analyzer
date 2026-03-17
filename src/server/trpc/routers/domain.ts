@@ -605,14 +605,38 @@ export const domainRouter = router({
           configJson: rs,
         };
       }
-      for (const eo of eventOrchestrations) {
+      // Pull orchestration router rules in parallel (reveals dynamic routing to services)
+      const eoRouterResults = await Promise.allSettled(
+        eventOrchestrations.map((eo) => pdClient.getOrchestrationRouter(eo.id))
+      );
+
+      for (let i = 0; i < eventOrchestrations.length; i++) {
+        const eo = eventOrchestrations[i];
+        const routerResult = eoRouterResults[i];
+        const routerRules = routerResult.status === 'fulfilled' ? routerResult.value : null;
+
+        // Extract service IDs that this orchestration dynamically routes to
+        const routedServiceIds: string[] = [];
+        if (routerRules?.sets) {
+          for (const set of routerRules.sets) {
+            for (const rule of (set.rules || [])) {
+              const serviceId = rule?.actions?.route_to?.service?.id;
+              if (serviceId) routedServiceIds.push(serviceId);
+            }
+          }
+        }
+        // Also check catch_all
+        if (routerRules?.catch_all?.actions?.route_to?.service?.id) {
+          routedServiceIds.push(routerRules.catch_all.actions.route_to.service.id);
+        }
+
         resources[eo.id] = {
           pdId: eo.id,
           type: "EVENT_ORCHESTRATION",
           name: eo.name || "",
           teamIds: eo.team?.id ? [eo.team.id] : [],
-          dependencies: [],
-          configJson: eo,
+          dependencies: routedServiceIds, // Services this EO routes to
+          configJson: { ...eo, _routerRules: routerRules, _routedServiceIds: routedServiceIds },
         };
       }
 

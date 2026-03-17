@@ -37,7 +37,7 @@ export const incidentDataPull = inngest.createFunction(
 
     try {
       // Decrypt PD token
-      const decryptedToken = decryptToken(evaluation.domain.apiTokenEnc)
+      const decryptedToken = decryptToken(evaluation.domain.apiTokenEnc as any)
       const pdClient = new PagerDutyClient({
         token: decryptedToken,
         subdomain: evaluation.domain.subdomain,

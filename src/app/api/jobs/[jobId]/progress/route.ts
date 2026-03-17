@@ -14,7 +14,6 @@ export async function GET(
 ) {
   const { jobId } = await params
 
-  // Validate jobId
   if (!jobId || typeof jobId !== 'string') {
     return NextResponse.json(
       { error: 'Invalid jobId' },
@@ -22,66 +21,59 @@ export async function GET(
     )
   }
 
-  // Create a streaming response with SSE
   const stream = new ReadableStream({
     async start(controller) {
       try {
-        let lastSentState: unknown = null
+        let notFoundCount = 0
+        const maxNotFound = 30 // Wait up to 30 seconds for job to appear
+
         const pollInterval = setInterval(() => {
           const state = jobProgress.getProgress(jobId)
 
           if (!state) {
+            notFoundCount++
+            // Send pending status while waiting for job to start
             controller.enqueue(
               createSSEEvent({
-                status: 'not_found',
-                message: 'Job not found',
+                status: 'pending',
+                progress: 0,
+                message: 'Waiting for analysis to start...',
               })
             )
-            clearInterval(pollInterval)
-            controller.close()
+
+            // Close after timeout
+            if (notFoundCount >= maxNotFound) {
+              controller.enqueue(
+                createSSEEvent({
+                  status: 'not_found',
+                  progress: 0,
+                  message: 'Job not found after timeout',
+                })
+              )
+              clearInterval(pollInterval)
+              controller.close()
+            }
             return
           }
 
-          // Only send if state changed
-          if (JSON.stringify(state) !== JSON.stringify(lastSentState)) {
-            controller.enqueue(createSSEEvent(state))
-            lastSentState = state
-          }
+          // Reset counter once job appears
+          notFoundCount = 0
+
+          controller.enqueue(createSSEEvent(state))
 
           // Close stream when job completes or fails
           if (state.status === 'completed' || state.status === 'failed') {
             clearInterval(pollInterval)
-            controller.close()
+            // Small delay before closing to ensure client receives final message
+            setTimeout(() => {
+              try {
+                controller.close()
+              } catch {
+                // Already closed
+              }
+            }, 500)
           }
-        }, 1000) // Poll every 1 second
-
-        // Send initial state immediately
-        const initialState = jobProgress.getProgress(jobId)
-        if (initialState) {
-          controller.enqueue(createSSEEvent(initialState))
-          lastSentState = initialState
-
-          // Auto-close if already finished
-          if (
-            initialState.status === 'completed' ||
-            initialState.status === 'failed'
-          ) {
-            clearInterval(
-              setTimeout(() => {
-                clearInterval(pollInterval)
-              }, 100)
-            )
-          }
-        } else {
-          // No job data yet
-          controller.enqueue(
-            createSSEEvent({
-              status: 'pending',
-              progress: 0,
-              message: 'Job pending',
-            })
-          )
-        }
+        }, 1000)
 
         // Cleanup on abort
         request.signal.addEventListener('abort', () => {

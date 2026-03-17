@@ -1,0 +1,630 @@
+import { prisma } from '@/server/db/client'
+import { decryptToken } from '@/server/db/encryption'
+import { PagerDutyClient } from '@/server/services/pd/client'
+import { jobProgress } from '@/server/services/job-progress'
+import { analyzeVolume } from '@/server/services/analysis/volume'
+import { analyzeNoise } from '@/server/services/analysis/noise'
+import { analyzeSources } from '@/server/services/analysis/sources'
+import { analyzeShadowStack } from '@/server/services/analysis/shadow-stack'
+import { analyzeRisk } from '@/server/services/analysis/risk'
+
+/**
+ * Run an evaluation directly (no Inngest required).
+ *
+ * SCOPE-AWARE: Only analyzes resources related to the selected teams/services.
+ * When scopeType=TEAM: pulls incidents for those teams, maps services owned by those teams
+ * When scopeType=SERVICE: pulls incidents for those services, maps those services + their deps
+ *
+ * ORCHESTRATION-AWARE: Inspects stored Event Orchestration router rules to determine
+ * how services receive alerts (dynamic routing via Global EO vs direct integration).
+ */
+export async function runEvaluationAnalysis(evaluationId: string): Promise<void> {
+  const jobId = evaluationId
+
+  console.log(`[EvaluationRunner] Starting evaluation ${evaluationId}`)
+
+  try {
+    jobProgress.updateProgress(jobId, {
+      status: 'running',
+      progress: 0,
+      message: 'Loading evaluation...',
+    })
+
+    // Step 1: Load evaluation, domain, and latest config snapshot
+    const evaluation = await prisma.evaluation.findUnique({
+      where: { id: evaluationId },
+      include: {
+        domain: {
+          include: {
+            configSnapshots: {
+              where: { status: 'COMPLETED' },
+              orderBy: { capturedAt: 'desc' },
+              take: 1,
+              include: { resources: true },
+            },
+          },
+        },
+      },
+    })
+
+    if (!evaluation) {
+      throw new Error(`Evaluation ${evaluationId} not found`)
+    }
+
+    const latestSnapshot = evaluation.domain.configSnapshots?.[0]
+    if (!latestSnapshot) {
+      throw new Error('No config snapshot found. Run a config sync first.')
+    }
+
+    // Update status to INCIDENT_PULL
+    await prisma.evaluation.update({
+      where: { id: evaluationId },
+      data: { status: 'INCIDENT_PULL', startedAt: new Date() },
+    })
+
+    jobProgress.updateProgress(jobId, {
+      status: 'running',
+      progress: 5,
+      message: 'Connecting to PagerDuty...',
+    })
+
+    // Decrypt PD token and create client
+    const decryptedToken = decryptToken(evaluation.domain.apiTokenEnc)
+    const pdClient = new PagerDutyClient({
+      token: decryptedToken,
+      subdomain: evaluation.domain.subdomain,
+    })
+
+    // Calculate time range
+    const timeRangeDays = evaluation.timeRangeDays || 30
+    const endDate = new Date()
+    const startDate = new Date(endDate)
+    startDate.setDate(startDate.getDate() - timeRangeDays)
+    const since = startDate.toISOString()
+    const until = endDate.toISOString()
+
+    const scopeType = evaluation.scopeType
+    const scopeIds = evaluation.scopeIds || []
+
+    // ── Step 2: Determine scoped resources from config snapshot ──
+    // Parse configJson for all resources to build the orchestration routing map
+    const allResources = latestSnapshot.resources
+    const resourcesByType = new Map<string, typeof allResources>()
+    for (const r of allResources) {
+      const list = resourcesByType.get(r.pdType) || []
+      list.push(r)
+      resourcesByType.set(r.pdType, list)
+    }
+
+    // Build orchestration → service routing map from stored config
+    const eoResources = resourcesByType.get('EVENT_ORCHESTRATION') || []
+    // Map: serviceId → list of orchestrations that route to it
+    const serviceToOrchestrations = new Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number }>>()
+    for (const eo of eoResources) {
+      try {
+        const config = JSON.parse(Buffer.from(eo.configJson).toString('utf-8'))
+        const routedServiceIds: string[] = config._routedServiceIds || []
+        const routerRules = config._routerRules
+        const ruleCount = routerRules?.sets?.reduce((n: number, s: any) => n + (s.rules?.length || 0), 0) || 0
+
+        for (const svcId of routedServiceIds) {
+          const existing = serviceToOrchestrations.get(svcId) || []
+          existing.push({ eoName: eo.name, eoPdId: eo.pdId, ruleCount })
+          serviceToOrchestrations.set(svcId, existing)
+        }
+      } catch {
+        // configJson parse failed, skip
+      }
+    }
+
+    // Determine which service PD IDs are in scope
+    let scopedServicePdIds: Set<string>
+    let scopedTeamPdIds: Set<string>
+
+    if (scopeType === 'TEAM') {
+      scopedTeamPdIds = new Set(scopeIds)
+      // Services in scope = services owned by the selected teams
+      scopedServicePdIds = new Set(
+        allResources
+          .filter((r) => r.pdType === 'SERVICE' && r.teamIds.some((t) => scopedTeamPdIds.has(t)))
+          .map((r) => r.pdId)
+      )
+    } else {
+      // SERVICE scope
+      scopedServicePdIds = new Set(scopeIds)
+      // Derive teams from the selected services
+      scopedTeamPdIds = new Set(
+        allResources
+          .filter((r) => r.pdType === 'SERVICE' && scopedServicePdIds.has(r.pdId))
+          .flatMap((r) => r.teamIds)
+      )
+    }
+
+    console.log(`[EvaluationRunner] Scope: ${scopedServicePdIds.size} services, ${scopedTeamPdIds.size} teams`)
+
+    // ── Step 3: Pull incidents scoped to selection (progress 10-35%) ──
+    jobProgress.updateProgress(jobId, {
+      status: 'running',
+      progress: 10,
+      message: `Pulling incidents for ${scopeIds.length} ${scopeType === 'TEAM' ? 'teams' : 'services'} over ${timeRangeDays} days...`,
+    })
+
+    const incidentParams =
+      scopeType === 'TEAM'
+        ? { teamIds: scopeIds, since, until }
+        : { serviceIds: scopeIds, since, until }
+
+    const incidents = await pdClient.listIncidents({
+      ...incidentParams,
+      onPage: (fetched, hasMore) => {
+        const progress = hasMore ? Math.min(10 + Math.floor(fetched / 50), 34) : 35
+        jobProgress.updateProgress(jobId, {
+          status: 'running',
+          progress,
+          message: `Pulled ${fetched.toLocaleString()} incidents so far${hasMore ? '...' : '. Done!'}`,
+        })
+      },
+    })
+
+    console.log(`[EvaluationRunner] Pulled ${incidents.length} incidents`)
+
+    jobProgress.updateProgress(jobId, {
+      status: 'running',
+      progress: 35,
+      message: `Pulled ${incidents.length.toLocaleString()} incidents. Fetching scoped service details...`,
+    })
+
+    // ── Step 4: Pull service details only for scoped services ──
+    const serviceParams =
+      scopeType === 'TEAM' ? { teamIds: scopeIds } : {}
+    let services = await pdClient.listServices(serviceParams)
+
+    // If SERVICE scope, filter to only selected services
+    if (scopeType === 'SERVICE') {
+      services = services.filter((s: any) => scopedServicePdIds.has(s.id))
+    }
+
+    console.log(`[EvaluationRunner] ${services.length} scoped services`)
+
+    jobProgress.updateProgress(jobId, {
+      status: 'running',
+      progress: 50,
+      message: `Found ${services.length} scoped services. Sampling log entries...`,
+    })
+
+    // ── Step 5: Pull log entries (sample for noise analysis) ──
+    let logEntries: any[] = []
+    try {
+      const logSince = timeRangeDays > 30
+        ? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
+        : since
+
+      logEntries = await pdClient.getLogEntries({
+        since: logSince,
+        until,
+        isOverview: false,
+        onPage: (fetched, hasMore) => {
+          const progress = hasMore ? Math.min(50 + Math.floor(fetched / 100), 59) : 60
+          jobProgress.updateProgress(jobId, {
+            status: 'running',
+            progress,
+            message: `Collected ${fetched.toLocaleString()} log entries${hasMore ? '...' : '. Done!'}`,
+          })
+        },
+      })
+    } catch (err) {
+      console.warn('[EvaluationRunner] Log entries API failed, continuing without:', err)
+    }
+
+    jobProgress.updateProgress(jobId, {
+      status: 'running',
+      progress: 60,
+      message: `Collected ${logEntries.length.toLocaleString()} log entries. Running analysis...`,
+    })
+
+    // Update status to ANALYZING
+    await prisma.evaluation.update({
+      where: { id: evaluationId },
+      data: { status: 'ANALYZING' },
+    })
+
+    // ── Step 6: Build integrations map ──
+    const integrationsMap = new Map<string, any[]>()
+    services.forEach((svc: any) => {
+      integrationsMap.set(svc.id, svc.integrations || [])
+    })
+
+    // ── Step 7: Run analysis engines ──
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 65, message: 'Analyzing incident volume...' })
+    const volumeAnalysis = analyzeVolume(incidents, services)
+
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 72, message: 'Analyzing noise patterns...' })
+    const noiseAnalysis = analyzeNoise(incidents, logEntries)
+
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 78, message: 'Identifying alert sources...' })
+    const sourceAnalysis = analyzeSources(incidents, services, integrationsMap)
+
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 84, message: 'Detecting shadow stack integrations...' })
+    const shadowStackAnalysis = analyzeShadowStack(incidents, logEntries, services, integrationsMap)
+
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 88, message: 'Calculating risk assessment...' })
+    // Only pass scoped resources into risk analysis
+    const scopedResources = allResources.filter((r) => {
+      if (r.pdType === 'SERVICE') return scopedServicePdIds.has(r.pdId)
+      if (r.pdType === 'TEAM') return scopedTeamPdIds.has(r.pdId)
+      // Include EPs, schedules, etc. that are dependencies of scoped services
+      if (r.pdType === 'ESCALATION_POLICY' || r.pdType === 'SCHEDULE') {
+        return allResources.some(
+          (svc) => svc.pdType === 'SERVICE' && scopedServicePdIds.has(svc.pdId) && svc.dependencies.includes(r.pdId)
+        )
+      }
+      // Include EOs that route to scoped services
+      if (r.pdType === 'EVENT_ORCHESTRATION') {
+        return r.dependencies?.some((depId) => scopedServicePdIds.has(depId))
+      }
+      return false
+    })
+
+    const riskAnalysis = analyzeRisk(volumeAnalysis, noiseAnalysis, shadowStackAnalysis, scopedResources, timeRangeDays)
+
+    // ── Step 8: Store results ──
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 92, message: 'Storing analysis results...' })
+
+    const noisePatterns = {
+      autoResolvedPercent: noiseAnalysis.autoResolvedPercent,
+      ackNoActionPercent: noiseAnalysis.ackNoActionPercent,
+      escalatedPercent: noiseAnalysis.escalatedPercent,
+      transientAlerts: noiseAnalysis.transientAlerts,
+      meanTimeToAck: noiseAnalysis.meanTimeToAck,
+      meanTimeToResolve: noiseAnalysis.meanTimeToResolve,
+      overallNoiseRatio: noiseAnalysis.overallNoiseRatio,
+    }
+
+    const shadowSignals = shadowStackAnalysis.signals.map((s) => s.type)
+
+    await prisma.incidentAnalysis.create({
+      data: {
+        evaluationId,
+        periodStart: startDate,
+        periodEnd: endDate,
+        incidentCount: volumeAnalysis.totalIncidents,
+        alertCount: volumeAnalysis.totalAlerts,
+        noiseRatio: noiseAnalysis.overallNoiseRatio,
+        mttrP50: noiseAnalysis.meanTimeToResolve > 0 ? noiseAnalysis.meanTimeToResolve : null,
+        mttrP95: null,
+        sourcesJson: Buffer.from(JSON.stringify({
+          sources: sourceAnalysis,
+          volume: volumeAnalysis,
+          risk: riskAnalysis,
+          shadowStack: shadowStackAnalysis,
+        })),
+        patternsJson: Buffer.from(JSON.stringify(noisePatterns)),
+        shadowSignals,
+      },
+    })
+
+    // ── Step 9: Create SCOPED migration mappings ──
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 96, message: 'Generating migration mappings...' })
+
+    // Link evaluation to the config snapshot
+    await prisma.evaluation.update({
+      where: { id: evaluationId },
+      data: { configSnapshotId: latestSnapshot.id },
+    })
+
+    // Only create mappings for resources in scope (not the entire domain)
+    const scopedMappingResources = allResources.filter((r) => {
+      if (r.pdType === 'SERVICE') return scopedServicePdIds.has(r.pdId)
+      if (r.pdType === 'TEAM') return scopedTeamPdIds.has(r.pdId)
+      if (r.pdType === 'ESCALATION_POLICY' || r.pdType === 'SCHEDULE') {
+        return allResources.some(
+          (svc) => svc.pdType === 'SERVICE' && scopedServicePdIds.has(svc.pdId) && svc.dependencies.includes(r.pdId)
+        )
+      }
+      if (r.pdType === 'EVENT_ORCHESTRATION') {
+        return r.dependencies?.some((depId) => scopedServicePdIds.has(depId))
+      }
+      // Skip users, business services, rulesets unless directly related
+      return false
+    })
+
+    console.log(`[EvaluationRunner] Creating ${scopedMappingResources.length} scoped migration mappings (vs ${allResources.length} total)`)
+
+    const mappingData = scopedMappingResources.map((resource) => {
+      const mapping = getResourceMapping(resource, serviceToOrchestrations, integrationsMap)
+      return {
+        evaluationId,
+        pdResourceId: resource.id,
+        ioResourceType: mapping.ioResourceType,
+        conversionStatus: mapping.conversionStatus,
+        effortEstimate: mapping.effortEstimate,
+        notes: mapping.notes,
+        ioTfSnippet: mapping.ioTfSnippet,
+      }
+    })
+
+    await prisma.$transaction(async (tx) => {
+      for (const data of mappingData) {
+        await tx.migrationMapping.create({ data })
+      }
+    }, { timeout: 60000 })
+
+    // ── Step 10: Mark evaluation as COMPLETED ──
+    await prisma.evaluation.update({
+      where: { id: evaluationId },
+      data: { status: 'COMPLETED', completedAt: new Date() },
+    })
+
+    jobProgress.updateProgress(jobId, {
+      status: 'completed',
+      progress: 100,
+      message: `Analysis complete. ${incidents.length} incidents analyzed across ${services.length} services.`,
+    })
+
+    console.log(
+      `[EvaluationRunner] Completed ${evaluationId}: ` +
+        `${incidents.length} incidents, ${services.length} services, ` +
+        `${scopedMappingResources.length} mappings, ` +
+        `risk=${riskAnalysis.overallComplexity}`
+    )
+  } catch (error) {
+    console.error(`[EvaluationRunner] Failed ${evaluationId}:`, error instanceof Error ? error.stack : error)
+
+    try {
+      await prisma.evaluation.update({
+        where: { id: evaluationId },
+        data: { status: 'FAILED' },
+      })
+    } catch {
+      // Ignore update failure
+    }
+
+    jobProgress.updateProgress(jobId, {
+      status: 'failed',
+      progress: 0,
+      message: error instanceof Error ? error.message : 'Unknown error during analysis',
+    })
+  }
+}
+
+// ─── Migration Mapping Logic ────────────────────────────────────────────
+
+interface MappingResult {
+  ioResourceType: string | null
+  conversionStatus: 'AUTO' | 'MANUAL' | 'SKIP' | 'UNSUPPORTED'
+  effortEstimate: string | null
+  notes: string | null
+  ioTfSnippet: string | null
+}
+
+/**
+ * Map PD resource types to incident.io equivalents.
+ * ORCHESTRATION-AWARE: detects dynamic routing via Global Event Orchestration.
+ */
+function getResourceMapping(
+  resource: {
+    pdType: string
+    pdId: string
+    name: string
+    teamIds: string[]
+    configJson: Uint8Array
+    dependencies: string[]
+  },
+  serviceToOrchestrations: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number }>>,
+  integrationsMap: Map<string, any[]>,
+): MappingResult {
+  switch (resource.pdType) {
+    case 'SCHEDULE':
+      return {
+        ioResourceType: 'incident_schedule',
+        conversionStatus: 'AUTO',
+        effortEstimate: 'Low',
+        notes: 'On-call schedules map directly to incident.io schedules via Terraform.',
+        ioTfSnippet: `resource "incident_schedule" "${sanitizeName(resource.name)}" {\n  name = "${resource.name}"\n}`,
+      }
+
+    case 'ESCALATION_POLICY':
+      return {
+        ioResourceType: 'incident_escalation_path',
+        conversionStatus: 'AUTO',
+        effortEstimate: 'Low',
+        notes: 'Escalation policies map to incident.io escalation paths via Terraform.',
+        ioTfSnippet: `resource "incident_escalation_path" "${sanitizeName(resource.name)}" {\n  name = "${resource.name}"\n}`,
+      }
+
+    case 'TEAM':
+      return {
+        ioResourceType: 'incident_catalog_entry',
+        conversionStatus: 'AUTO',
+        effortEstimate: 'Low',
+        notes: 'Teams map to incident.io catalog entries (Team type) via Terraform.',
+        ioTfSnippet: `resource "incident_catalog_entry" "${sanitizeName(resource.name)}" {\n  catalog_type_id = "team"\n  name = "${resource.name}"\n}`,
+      }
+
+    case 'SERVICE':
+      return getServiceMapping(resource, serviceToOrchestrations, integrationsMap)
+
+    case 'BUSINESS_SERVICE':
+      return {
+        ioResourceType: 'incident_catalog_entry',
+        conversionStatus: 'MANUAL',
+        effortEstimate: 'Medium',
+        notes: 'Business services map to incident.io catalog entries with custom attributes.',
+        ioTfSnippet: null,
+      }
+
+    case 'EVENT_ORCHESTRATION':
+      return getOrchestrationMapping(resource)
+
+    case 'RULESET':
+      return {
+        ioResourceType: null,
+        conversionStatus: 'UNSUPPORTED',
+        effortEstimate: 'High',
+        notes: 'Legacy rulesets are deprecated in PagerDuty. Convert to incident.io alert routes.',
+        ioTfSnippet: null,
+      }
+
+    case 'USER':
+      return {
+        ioResourceType: null,
+        conversionStatus: 'SKIP',
+        effortEstimate: null,
+        notes: 'Users are provisioned via SSO/SCIM — no migration needed.',
+        ioTfSnippet: null,
+      }
+
+    default:
+      return {
+        ioResourceType: null,
+        conversionStatus: 'MANUAL',
+        effortEstimate: 'Unknown',
+        notes: `Unknown resource type: ${resource.pdType}`,
+        ioTfSnippet: null,
+      }
+  }
+}
+
+/**
+ * Determine the migration mapping for a SERVICE by inspecting:
+ * 1. Whether it receives alerts via Global Event Orchestration dynamic routing
+ * 2. What direct integrations it has (email, API, monitoring tools)
+ */
+function getServiceMapping(
+  resource: { pdId: string; name: string; configJson: Uint8Array },
+  serviceToOrchestrations: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number }>>,
+  integrationsMap: Map<string, any[]>,
+): MappingResult {
+  const eos = serviceToOrchestrations.get(resource.pdId) || []
+  const integrations = integrationsMap.get(resource.pdId) || []
+
+  // Classify integrations
+  const integrationTypes: string[] = []
+  let hasEmailIntegration = false
+  let hasApiIntegration = false
+  let monitoringTools: string[] = []
+
+  for (const intg of integrations) {
+    const type = (intg.type || '').toLowerCase()
+    const vendor = (intg.vendor?.name || intg.name || '').toLowerCase()
+    const summary = (intg.summary || '').toLowerCase()
+
+    if (type.includes('email') || vendor.includes('email')) {
+      hasEmailIntegration = true
+      integrationTypes.push('Email')
+    } else if (type.includes('events_api') || type.includes('generic_events_api')) {
+      hasApiIntegration = true
+      integrationTypes.push('Events API')
+    }
+
+    // Detect common monitoring tool integrations
+    const knownTools = ['datadog', 'cloudwatch', 'new relic', 'newrelic', 'grafana', 'prometheus',
+      'splunk', 'nagios', 'zabbix', 'dynatrace', 'sumo logic', 'elastic', 'pingdom',
+      'statuspage', 'jira', 'servicenow', 'terraform', 'aws', 'gcp', 'azure']
+    for (const tool of knownTools) {
+      if (vendor.includes(tool) || summary.includes(tool) || type.includes(tool)) {
+        monitoringTools.push(vendor || summary || type)
+        break
+      }
+    }
+  }
+  // Deduplicate
+  monitoringTools = [...new Set(monitoringTools)]
+
+  // Build notes based on what we found
+  const notes: string[] = []
+  let conversionStatus: 'AUTO' | 'MANUAL' = 'MANUAL'
+  let effortEstimate = 'Medium'
+
+  if (eos.length > 0) {
+    // Service receives alerts via Global Event Orchestration
+    const eoNames = eos.map((e) => e.eoName).join(', ')
+    notes.push(`Routed via Global Event Orchestration: ${eoNames}.`)
+    notes.push('Dynamic routing in PD maps to incident.io alert routes — straightforward to replicate.')
+    conversionStatus = 'AUTO'
+    effortEstimate = 'Low'
+  }
+
+  if (integrations.length === 0 && eos.length === 0) {
+    notes.push('No integrations or orchestration routing detected. May be inactive or manually triggered.')
+    effortEstimate = 'Low'
+  }
+
+  if (hasEmailIntegration) {
+    notes.push('Has email integration — incident.io supports email alert sources natively.')
+  }
+
+  if (hasApiIntegration && eos.length === 0) {
+    notes.push('Uses Events API directly — update the integration endpoint to incident.io alert source URL.')
+  }
+
+  if (monitoringTools.length > 0) {
+    notes.push(`Connected monitoring tools: ${monitoringTools.join(', ')}.`)
+  }
+
+  if (notes.length === 0) {
+    notes.push('Service catalog entry in incident.io. Review alert routing configuration.')
+  }
+
+  return {
+    ioResourceType: 'incident_catalog_entry',
+    conversionStatus,
+    effortEstimate,
+    notes: notes.join(' '),
+    ioTfSnippet: conversionStatus === 'AUTO'
+      ? `resource "incident_catalog_entry" "${sanitizeName(resource.name)}" {\n  catalog_type_id = "service"\n  name = "${resource.name}"\n}`
+      : null,
+  }
+}
+
+/**
+ * Determine the migration mapping for an EVENT_ORCHESTRATION by inspecting
+ * how many rules and services it routes to.
+ */
+function getOrchestrationMapping(
+  resource: { pdId: string; name: string; configJson: Uint8Array; dependencies: string[] },
+): MappingResult {
+  let ruleCount = 0
+  let routedServiceCount = 0
+
+  try {
+    const config = JSON.parse(Buffer.from(resource.configJson).toString('utf-8'))
+    routedServiceCount = (config._routedServiceIds || []).length
+    const routerRules = config._routerRules
+    ruleCount = routerRules?.sets?.reduce((n: number, s: any) => n + (s.rules?.length || 0), 0) || 0
+  } catch {
+    // configJson parse failed
+  }
+
+  const notes: string[] = []
+
+  if (routedServiceCount > 0) {
+    notes.push(`Routes to ${routedServiceCount} service${routedServiceCount > 1 ? 's' : ''} via ${ruleCount} dynamic routing rule${ruleCount > 1 ? 's' : ''}.`)
+    notes.push('Global Event Orchestration dynamic routing maps to incident.io alert routes with condition-based routing.')
+    if (ruleCount <= 5) {
+      notes.push('Low rule count — straightforward migration.')
+    } else if (ruleCount <= 20) {
+      notes.push('Moderate rule count — review conditions for complexity.')
+    } else {
+      notes.push('High rule count — recommend phased migration of routing rules.')
+    }
+  } else {
+    notes.push('No dynamic routing rules detected. May use service-level orchestration or be inactive.')
+  }
+
+  return {
+    ioResourceType: 'incident_alert_route',
+    conversionStatus: routedServiceCount > 0 && ruleCount <= 10 ? 'MANUAL' : 'MANUAL',
+    effortEstimate: ruleCount <= 5 ? 'Low' : ruleCount <= 20 ? 'Medium' : 'High',
+    notes: notes.join(' '),
+    ioTfSnippet: null,
+  }
+}
+
+function sanitizeName(name: string): string {
+  return name
+    .toLowerCase()
+    .replace(/[^a-z0-9_]/g, '_')
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+}

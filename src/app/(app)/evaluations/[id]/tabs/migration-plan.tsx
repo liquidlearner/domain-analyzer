@@ -5,16 +5,15 @@ import { Badge } from "@/components/ui/badge";
 
 interface MigrationMapping {
   conversionStatus: "AUTO" | "MANUAL" | "SKIP" | "UNSUPPORTED";
-  effortEstimate?: string;
+  effortEstimate?: string | null;
   pdResource: {
     pdType: string;
     name: string;
   };
 }
 
-interface Evaluation {
-  migrationMappings: MigrationMapping[];
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Evaluation = any;
 
 interface MigrationPlanTabProps {
   evaluation: Evaluation;
@@ -33,7 +32,7 @@ export default function MigrationPlanTab({ evaluation }: MigrationPlanTabProps) 
   const [expandedPhases, setExpandedPhases] = useState<Set<number>>(new Set([1]));
 
   const { phases, riskFactors, timelineEstimate } = useMemo(() => {
-    const mappings = evaluation.migrationMappings || [];
+    const mappings: MigrationMapping[] = evaluation.migrationMappings || [];
 
     const autoResources = mappings.filter((m) => m.conversionStatus === "AUTO");
     const manualResources = mappings.filter((m) => m.conversionStatus === "MANUAL");

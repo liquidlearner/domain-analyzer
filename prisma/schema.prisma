@@ -159,6 +159,7 @@ model Evaluation {
   configSnapshotId  String?
   scopeType         ScopeType
   scopeIds          String[]
+  timeRangeDays     Int                @default(30)
   startedAt         DateTime?
   completedAt       DateTime?
   createdAt         DateTime           @default(now())
@@ -191,6 +192,7 @@ model IncidentAnalysis {
 
   evaluation Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
 
+  @@unique([evaluationId, periodStart, periodEnd])
   @@map("incident_analyses")
 }
 

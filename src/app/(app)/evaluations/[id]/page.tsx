@@ -1,37 +1,13 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useParams } from "next/navigation";
-import {
-  LineChart,
-  Line,
-  BarChart,
-  Bar,
-  PieChart,
-  Pie,
-  Cell,
-  ResponsiveContainer,
-  XAxis,
-  YAxis,
-  CartesianGrid,
-  Tooltip,
-  Legend,
-} from "recharts";
-import { AlertCircle, Loader2, X } from "lucide-react";
+import { AlertCircle, Loader2, X, RefreshCw } from "lucide-react";
 import { PageHeader } from "@/components/ui/page-header";
 import { Button } from "@/components/ui/button";
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
+import { Card, CardContent } from "@/components/ui/card";
 import { Progress } from "@/components/ui/progress";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
-} from "@/components/ui/table";
 import { trpc } from "@/lib/trpc";
 import { useToast } from "@/hooks/use-toast";
 import OverviewTab from "./tabs/overview";
@@ -41,8 +17,8 @@ import AlertSourcesTab from "./tabs/alert-sources";
 import ShadowStackTab from "./tabs/shadow-stack";
 import MigrationPlanTab from "./tabs/migration-plan";
 
-interface ProgressMessage {
-  step: string;
+interface ProgressData {
+  status: string;
   progress: number;
   message: string;
 }
@@ -52,53 +28,87 @@ export default function EvaluationPage() {
   const evaluationId = params.id as string;
   const { toast } = useToast();
 
-  const { data: evaluation, isLoading, refetch } = trpc.evaluation.getById.useQuery({
-    id: evaluationId,
-  });
+  const { data: evaluation, isLoading, refetch } = trpc.evaluation.getById.useQuery(
+    { id: evaluationId },
+    { refetchInterval: (query) => {
+      // Auto-refetch while running
+      const status = query.state.data?.status;
+      if (status && !["COMPLETED", "FAILED", "CANCELLED"].includes(status)) {
+        return 3000;
+      }
+      return false;
+    }},
+  );
 
   const cancelMutation = trpc.evaluation.cancel.useMutation();
-  const [progressMessage, setProgressMessage] = useState<ProgressMessage | null>(null);
-  const [progressPercent, setProgressPercent] = useState(0);
+  const retryMutation = trpc.evaluation.retry.useMutation();
+  const [progressData, setProgressData] = useState<ProgressData | null>(null);
 
   // Setup SSE subscription for progress
   useEffect(() => {
-    if (!evaluation || evaluation.status === "COMPLETED" || evaluation.status === "FAILED") {
+    if (!evaluation || ["COMPLETED", "FAILED", "CANCELLED"].includes(evaluation.status)) {
       return;
     }
 
-    const eventSource = new EventSource(`/api/jobs/${evaluationId}/progress`);
+    let eventSource: EventSource | null = null;
+    let retryTimeout: NodeJS.Timeout | null = null;
+    let retryCount = 0;
+    const maxRetries = 10;
 
-    eventSource.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data) as ProgressMessage;
-        setProgressMessage(data);
-        setProgressPercent(data.progress);
+    const connect = () => {
+      eventSource = new EventSource(`/api/jobs/${evaluationId}/progress`);
 
-        // Refetch evaluation data when completed
-        if (data.progress >= 100) {
-          setTimeout(() => refetch(), 1000);
+      eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as ProgressData;
+
+          // Ignore "not_found" — the job may not have started yet
+          if (data.status === "not_found") {
+            retryCount++;
+            if (retryCount < maxRetries) {
+              eventSource?.close();
+              retryTimeout = setTimeout(connect, 2000);
+            }
+            return;
+          }
+
+          retryCount = 0; // Reset on valid data
+          setProgressData(data);
+
+          // Refetch evaluation data when completed or failed
+          if (data.status === "completed" || data.status === "failed") {
+            // Refetch immediately, then again after a short delay to ensure DB is updated
+            refetch();
+            setTimeout(() => refetch(), 1500);
+            setTimeout(() => refetch(), 4000);
+          }
+        } catch (error) {
+          console.error("Failed to parse progress message:", error);
         }
-      } catch (error) {
-        console.error("Failed to parse progress message:", error);
-      }
+      };
+
+      eventSource.onerror = () => {
+        eventSource?.close();
+        // Retry connection after a delay
+        if (retryCount < maxRetries) {
+          retryCount++;
+          retryTimeout = setTimeout(connect, 2000);
+        }
+      };
     };
 
-    eventSource.onerror = () => {
-      eventSource.close();
-    };
+    connect();
 
     return () => {
-      eventSource.close();
+      eventSource?.close();
+      if (retryTimeout) clearTimeout(retryTimeout);
     };
-  }, [evaluation, evaluationId, refetch]);
+  }, [evaluation?.status, evaluationId, refetch]);
 
   const handleCancel = async () => {
     try {
       await cancelMutation.mutateAsync({ id: evaluationId });
-      toast({
-        title: "Success",
-        description: "Evaluation cancelled",
-      });
+      toast({ title: "Success", description: "Evaluation cancelled" });
       refetch();
     } catch (error) {
       toast({
@@ -109,11 +119,26 @@ export default function EvaluationPage() {
     }
   };
 
+  const handleRetry = async () => {
+    try {
+      await retryMutation.mutateAsync({ id: evaluationId });
+      setProgressData(null);
+      toast({ title: "Success", description: "Evaluation restarted" });
+      refetch();
+    } catch (error) {
+      toast({
+        title: "Error",
+        description: error instanceof Error ? error.message : "Failed to retry evaluation",
+        variant: "destructive",
+      });
+    }
+  };
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center p-8">
         <div className="text-center">
-          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-2 text-blue-500" />
+          <Loader2 className="h-8 w-8 animate-spin mx-auto mb-2 text-primary" />
           <p className="text-zinc-600">Loading evaluation...</p>
         </div>
       </div>
@@ -128,13 +153,16 @@ export default function EvaluationPage() {
     );
   }
 
-  const isRunning = !["COMPLETED", "FAILED", "CANCELLED"].includes(evaluation.status);
+  const dbIsTerminal = ["COMPLETED", "FAILED", "CANCELLED"].includes(evaluation.status);
+  const sseIsCompleted = progressData?.status === "completed";
+  const isRunning = !dbIsTerminal && !sseIsCompleted;
   const domainSubdomain = evaluation.domain?.subdomain || "unknown";
+  const progressPercent = progressData?.progress ?? 0;
 
   return (
     <div className="space-y-6">
       <PageHeader
-        title={`Evaluation Results`}
+        title="Evaluation Results"
         description={`${domainSubdomain}.pagerduty.com`}
         actions={
           isRunning ? (
@@ -153,20 +181,35 @@ export default function EvaluationPage() {
 
       {/* Running State */}
       {isRunning && (
-        <Card className="border-blue-200 bg-blue-50">
+        <Card className="border-primary-muted bg-primary-light">
           <CardContent className="pt-6">
             <div className="space-y-4">
               <div className="flex items-center gap-2">
-                <Loader2 className="h-5 w-5 animate-spin text-blue-500" />
+                <Loader2 className="h-5 w-5 animate-spin text-primary" />
                 <div>
                   <p className="font-semibold text-sm">Analysis in progress</p>
                   <p className="text-xs text-zinc-600">
-                    {progressMessage?.message || `Current status: ${evaluation.status}`}
+                    {progressData?.message || `Current status: ${evaluation.status}`}
                   </p>
                 </div>
               </div>
               <Progress value={progressPercent} className="h-2" />
               <p className="text-xs text-zinc-500">{Math.round(progressPercent)}% complete</p>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Completing State — SSE done, waiting for DB refresh */}
+      {sseIsCompleted && !dbIsTerminal && (
+        <Card className="border-primary-muted bg-primary-light">
+          <CardContent className="pt-6">
+            <div className="flex items-center gap-2">
+              <Loader2 className="h-5 w-5 animate-spin text-primary" />
+              <div>
+                <p className="font-semibold text-sm">Analysis complete — loading results...</p>
+                <p className="text-xs text-zinc-600">{progressData?.message}</p>
+              </div>
             </div>
           </CardContent>
         </Card>
@@ -216,11 +259,21 @@ export default function EvaluationPage() {
           <CardContent className="pt-6">
             <div className="flex items-start gap-3">
               <AlertCircle className="h-5 w-5 text-red-500 flex-shrink-0 mt-0.5" />
-              <div>
+              <div className="flex-1">
                 <p className="font-semibold text-sm text-red-900">Evaluation Failed</p>
                 <p className="text-sm text-red-700 mt-1">
-                  The evaluation encountered an error during processing. Please try again or contact support.
+                  {progressData?.message || "The evaluation encountered an error during processing."}
                 </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="mt-3"
+                  onClick={handleRetry}
+                  disabled={retryMutation.isPending}
+                >
+                  <RefreshCw className="mr-2 h-4 w-4" />
+                  {retryMutation.isPending ? "Retrying..." : "Retry Analysis"}
+                </Button>
               </div>
             </div>
           </CardContent>

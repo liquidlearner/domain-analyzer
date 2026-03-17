@@ -157,7 +157,7 @@ export const conversionAnalysis = inngest.createFunction(
             .replace(/_+/g, '_')
             .replace(/^_|_$/g, '')
 
-          const configJson = JSON.parse(pdResource.configJson.toString('utf8'))
+          const configJson = JSON.parse(Buffer.from(pdResource.configJson as any).toString('utf8'))
 
           switch (pdResource.pdType) {
             case 'SCHEDULE': {

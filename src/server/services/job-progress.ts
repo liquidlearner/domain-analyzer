@@ -48,4 +48,15 @@ class JobProgressService {
   }
 }
 
-export const jobProgress = new JobProgressService()
+// Use globalThis to survive Next.js hot module reloading in dev mode
+// (same pattern as Prisma client singleton)
+const globalForJobProgress = globalThis as unknown as {
+  jobProgress: JobProgressService
+}
+
+export const jobProgress =
+  globalForJobProgress.jobProgress ?? new JobProgressService()
+
+if (process.env.NODE_ENV !== 'production') {
+  globalForJobProgress.jobProgress = jobProgress
+}

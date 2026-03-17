@@ -133,7 +133,7 @@ export default async function ReportPage({ params }: ReportPageProps) {
                 Domain
               </p>
               <p className="text-2xl font-bold text-zinc-900 mt-1">
-                {evaluation.domain.domain}
+                {evaluation.domain?.subdomain || 'Unknown'}
               </p>
             </div>
             <div>

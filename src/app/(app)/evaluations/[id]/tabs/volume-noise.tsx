@@ -19,13 +19,12 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 interface IncidentAnalysis {
   id: string;
   incidentCount: number;
-  periodStart: string;
-  periodEnd: string;
+  periodStart: string | Date;
+  periodEnd: string | Date;
 }
 
-interface Evaluation {
-  incidentAnalyses: IncidentAnalysis[];
-}
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type Evaluation = any;
 
 interface VolumeNoiseTabProps {
   evaluation: Evaluation;
@@ -46,7 +45,7 @@ const HOUR_LABELS = Array.from({ length: 24 }, (_, i) => `${i}:00`);
 
 export default function VolumeNoiseTab({ evaluation }: VolumeNoiseTabProps) {
   const { volumeData, heatmapData, severityData, noiseMetrics } = useMemo(() => {
-    const analyses = evaluation.incidentAnalyses || [];
+    const analyses: IncidentAnalysis[] = evaluation.incidentAnalyses || [];
 
     // Volume over time
     const volumeData = analyses

@@ -130,6 +130,7 @@ export class PagerDutyClient {
     serviceIds?: string[];
     since: string;
     until: string;
+    onPage?: (fetched: number, hasMore: boolean) => void;
   }): Promise<PDIncident[]> {
     const requestParams: Record<string, any> = {
       since: params.since,
@@ -147,7 +148,8 @@ export class PagerDutyClient {
     return this.paginateAll<PDIncident>(
       "/incidents",
       "incidents",
-      requestParams
+      requestParams,
+      params.onPage
     );
   }
 
@@ -168,6 +170,7 @@ export class PagerDutyClient {
     since: string;
     until: string;
     isOverview?: boolean;
+    onPage?: (fetched: number, hasMore: boolean) => void;
   }): Promise<PDLogEntry[]> {
     const requestParams: Record<string, any> = {
       since: params.since,
@@ -178,7 +181,7 @@ export class PagerDutyClient {
       requestParams.is_overview = params.isOverview;
     }
 
-    return this.paginateAll<PDLogEntry>("/log_entries", "log_entries", requestParams);
+    return this.paginateAll<PDLogEntry>("/log_entries", "log_entries", requestParams, params.onPage);
   }
 
   /**
@@ -231,6 +234,18 @@ export class PagerDutyClient {
       "/event_orchestrations",
       "orchestrations"
     );
+  }
+
+  /**
+   * Get the router rules for a specific Event Orchestration.
+   * This reveals which services are dynamically routed to.
+   */
+  async getOrchestrationRouter(orchestrationId: string): Promise<any> {
+    const response = await this.request<any>(
+      "GET",
+      `/event_orchestrations/${orchestrationId}/router`
+    );
+    return response.orchestration_path || response;
   }
 
   /**
@@ -337,12 +352,14 @@ export class PagerDutyClient {
   }
 
   /**
-   * Auto-paginate through all results using offset and limit
+   * Auto-paginate through all results using offset and limit.
+   * Accepts an optional onPage callback for progress reporting.
    */
   private async paginateAll<T>(
     path: string,
     resourceKey: string,
-    params?: Record<string, any>
+    params?: Record<string, any>,
+    onPage?: (fetched: number, hasMore: boolean) => void
   ): Promise<T[]> {
     const allResults: T[] = [];
     let offset = 0;
@@ -365,6 +382,10 @@ export class PagerDutyClient {
 
       hasMore = (response as any).more === true;
       offset += limit;
+
+      if (onPage) {
+        onPage(allResults.length, hasMore);
+      }
     }
 
     return allResults;
