@@ -132,6 +132,59 @@ export class PagerDutyClient {
     until: string;
     onPage?: (fetched: number, hasMore: boolean) => void;
   }): Promise<PDIncident[]> {
+    // PD API limits the date range to ~6 months for /incidents.
+    // For longer ranges, break into 180-day chunks and merge results.
+    const sinceDate = new Date(params.since);
+    const untilDate = new Date(params.until);
+    const diffDays = Math.ceil(
+      (untilDate.getTime() - sinceDate.getTime()) / (1000 * 60 * 60 * 24)
+    );
+
+    const MAX_CHUNK_DAYS = 179; // stay under the 6-month limit
+    if (diffDays <= MAX_CHUNK_DAYS) {
+      return this._listIncidentsSingle(params);
+    }
+
+    // Break into chunks
+    const allIncidents: PDIncident[] = [];
+    let chunkStart = new Date(sinceDate);
+
+    while (chunkStart < untilDate) {
+      const chunkEnd = new Date(chunkStart);
+      chunkEnd.setDate(chunkEnd.getDate() + MAX_CHUNK_DAYS);
+      if (chunkEnd > untilDate) {
+        chunkEnd.setTime(untilDate.getTime());
+      }
+
+      console.log(
+        `[PD Client] Fetching incidents chunk: ${chunkStart.toISOString().slice(0, 10)} → ${chunkEnd.toISOString().slice(0, 10)}`
+      );
+
+      const chunkIncidents = await this._listIncidentsSingle({
+        ...params,
+        since: chunkStart.toISOString(),
+        until: chunkEnd.toISOString(),
+        onPage: params.onPage
+          ? (fetched, hasMore) => {
+              params.onPage!(allIncidents.length + fetched, hasMore);
+            }
+          : undefined,
+      });
+
+      allIncidents.push(...chunkIncidents);
+      chunkStart = new Date(chunkEnd);
+    }
+
+    return allIncidents;
+  }
+
+  private async _listIncidentsSingle(params: {
+    teamIds?: string[];
+    serviceIds?: string[];
+    since: string;
+    until: string;
+    onPage?: (fetched: number, hasMore: boolean) => void;
+  }): Promise<PDIncident[]> {
     const requestParams: Record<string, any> = {
       since: params.since,
       until: params.until,
