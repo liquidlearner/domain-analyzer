@@ -8,8 +8,8 @@ interface StatusBadgeProps extends Omit<BadgeProps, "variant"> {
 export function StatusBadge({ status, className, ...props }: StatusBadgeProps) {
   const statusMap: Record<string, { variant: BadgeProps["variant"]; label: string }> = {
     // Success states
-    COMPLETED: { variant: "default", label: "Completed" },
-    CONNECTED: { variant: "default", label: "Connected" },
+    COMPLETED: { variant: "success", label: "Completed" },
+    CONNECTED: { variant: "success", label: "Connected" },
 
     // Info/Pending states
     PENDING: { variant: "secondary", label: "Pending" },

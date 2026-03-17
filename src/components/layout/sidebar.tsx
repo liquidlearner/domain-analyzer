@@ -100,11 +100,11 @@ export function Sidebar({ user }: SidebarProps) {
             className="mb-8 flex items-center gap-2"
             onClick={() => setIsOpen(false)}
           >
-            <div className="h-8 w-8 rounded-md bg-zinc-900 flex items-center justify-center">
-              <span className="text-white font-bold text-sm">PD</span>
+            <div className="h-8 w-8 rounded-md bg-primary flex items-center justify-center">
+              <span className="text-white font-bold text-sm">io</span>
             </div>
             <span className="font-semibold text-zinc-900">
-              PD Migration Analyzer
+              Migration Analyzer
             </span>
           </Link>
 
@@ -122,7 +122,7 @@ export function Sidebar({ user }: SidebarProps) {
                   className={cn(
                     "flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors",
                     active
-                      ? "bg-zinc-100 text-zinc-900"
+                      ? "bg-primary-light text-primary"
                       : "text-zinc-600 hover:bg-zinc-50 hover:text-zinc-900"
                   )}
                 >

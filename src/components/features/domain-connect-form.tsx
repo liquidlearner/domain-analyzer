@@ -131,8 +131,8 @@ export default function DomainConnectForm({
       {/* Step 2: Token */}
       <div className={currentStep === "token" ? "block" : "hidden"}>
         <div className="space-y-3">
-          <Card className="p-3 bg-blue-50 border-blue-200">
-            <p className="text-sm text-blue-900">
+          <Card className="p-3 bg-primary-light border-primary-muted">
+            <p className="text-sm text-zinc-800">
               Subdomain: <span className="font-semibold">{subdomain}.pagerduty.com</span>
             </p>
           </Card>
@@ -187,11 +187,11 @@ export default function DomainConnectForm({
       {/* Step 3: Validate & Connect */}
       <div className={currentStep === "validate" ? "block" : "hidden"}>
         <div className="space-y-3">
-          <Card className="p-3 bg-blue-50 border-blue-200 space-y-2">
-            <p className="text-sm text-blue-900">
+          <Card className="p-3 bg-primary-light border-primary-muted space-y-2">
+            <p className="text-sm text-zinc-800">
               Subdomain: <span className="font-semibold">{subdomain}.pagerduty.com</span>
             </p>
-            <p className="text-sm text-blue-900">
+            <p className="text-sm text-zinc-800">
               Token: <span className="font-semibold font-mono">••••{apiToken.slice(-4)}</span>
             </p>
           </Card>

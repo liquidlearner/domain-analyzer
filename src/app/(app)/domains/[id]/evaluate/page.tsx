@@ -187,13 +187,13 @@ export default function EvaluatePage() {
               }}
               className={`p-4 rounded-lg border-2 text-left transition-colors ${
                 scopeType === type
-                  ? "border-blue-500 bg-blue-50"
+                  ? "border-primary bg-primary-light"
                   : "border-zinc-200 bg-white hover:border-zinc-300"
               }`}
             >
               <div className="flex items-center gap-2">
                 {scopeType === type ? (
-                  <CheckCircle2 className="h-5 w-5 text-blue-500" />
+                  <CheckCircle2 className="h-5 w-5 text-primary" />
                 ) : (
                   <Circle className="h-5 w-5 text-zinc-400" />
                 )}
@@ -265,7 +265,7 @@ export default function EvaluatePage() {
                       <div
                         className={`h-5 w-5 rounded border-2 flex items-center justify-center transition-colors ${
                           selectedIds.has(option.id)
-                            ? "bg-blue-500 border-blue-500"
+                            ? "bg-primary border-primary"
                             : "border-zinc-300"
                         }`}
                       >
@@ -327,7 +327,7 @@ export default function EvaluatePage() {
                 onClick={() => setTimeRange(option.value as "30" | "90" | "365")}
                 className={`p-4 rounded-lg border-2 text-center transition-colors ${
                   timeRange === option.value
-                    ? "border-blue-500 bg-blue-50"
+                    ? "border-primary bg-primary-light"
                     : "border-zinc-200 bg-white hover:border-zinc-300"
                 }`}
               >

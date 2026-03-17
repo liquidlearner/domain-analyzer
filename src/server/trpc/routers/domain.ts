@@ -642,29 +642,24 @@ export const domainRouter = router({
       });
 
       // Create individual PdResource records with full PD config stored
-      // Note: createMany doesn't support Bytes fields in Prisma, so we use
-      // batched transactions of individual creates for performance
+      // Use interactive transaction to properly handle Bytes fields
       const resourceEntries = Object.values(resources);
-      const BATCH_SIZE = 100;
-      for (let i = 0; i < resourceEntries.length; i += BATCH_SIZE) {
-        const batch = resourceEntries.slice(i, i + BATCH_SIZE);
-        await ctx.prisma.$transaction(
-          batch.map((resource) =>
-            ctx.prisma.pdResource.create({
-              data: {
-                snapshotId: snapshot.id,
-                pdType: resource.type as any,
-                pdId: resource.pdId,
-                name: resource.name,
-                teamIds: resource.teamIds,
-                configJson: Buffer.from(JSON.stringify(resource.configJson)),
-                isStale: false, // Determined during analysis
-                dependencies: resource.dependencies,
-              },
-            })
-          )
-        );
-      }
+      await ctx.prisma.$transaction(async (tx) => {
+        for (const resource of resourceEntries) {
+          await tx.pdResource.create({
+            data: {
+              snapshotId: snapshot.id,
+              pdType: resource.type as any,
+              pdId: resource.pdId,
+              name: resource.name,
+              teamIds: resource.teamIds,
+              configJson: Buffer.from(JSON.stringify(resource.configJson)),
+              isStale: false,
+              dependencies: resource.dependencies,
+            },
+          });
+        }
+      }, { timeout: 60000 }); // 60s timeout for large domains
 
       // Update domain validation timestamp
       await ctx.prisma.pdDomain.update({
