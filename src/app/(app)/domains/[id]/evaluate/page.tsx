@@ -14,19 +14,14 @@ import { useToast } from "@/hooks/use-toast";
 
 interface Resource {
   id: string;
+  pdId: string;
   name: string;
   pdType: string;
   teamIds: string[];
 }
 
-interface TeamOption {
-  id: string;
-  name: string;
-  resourceCount: number;
-}
-
-interface ServiceOption {
-  id: string;
+interface ScopeOption {
+  id: string;    // PD ID (not Prisma ID)
   name: string;
   resourceCount: number;
 }
@@ -55,39 +50,35 @@ export default function EvaluatePage() {
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set());
 
-  // Extract and organize resources
+  // Extract and organize resources from snapshot — use pdId (PagerDuty ID)
   const { teams, services } = useMemo(() => {
     if (!domain?.latestSnapshot?.resources) {
       return { teams: [], services: [] };
     }
 
     const resources = domain.latestSnapshot.resources as Resource[];
-    const teamMap = new Map<string, Set<string>>();
-    const serviceMap = new Map<string, string>();
 
-    resources.forEach((res) => {
-      if (res.pdType === "TEAM") {
-        teamMap.set(res.id, new Set([res.id]));
-        teamMap.get(res.id)!.add(res.name);
-      } else if (res.pdType === "SERVICE") {
-        serviceMap.set(res.id, res.name);
-      }
-    });
+    // Build teams: pdType=TEAM resources, count how many other resources reference each team
+    const teams: ScopeOption[] = resources
+      .filter((r) => r.pdType === "TEAM")
+      .map((team) => ({
+        id: team.pdId,
+        name: team.name || "Unnamed Team",
+        resourceCount: resources.filter(
+          (r) => r.pdType !== "TEAM" && r.teamIds?.includes(team.pdId)
+        ).length,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
 
-    const teams: TeamOption[] = Array.from(teamMap.entries()).map(([id, data]) => {
-      const teamData = Array.from(data);
-      return {
-        id: teamData[0],
-        name: teamData[1] || "Unnamed Team",
-        resourceCount: resources.filter((r) => r.teamIds?.includes(id)).length,
-      };
-    });
-
-    const services: ServiceOption[] = Array.from(serviceMap.entries()).map(([id, name]) => ({
-      id,
-      name,
-      resourceCount: 1,
-    }));
+    // Build services: pdType=SERVICE resources
+    const services: ScopeOption[] = resources
+      .filter((r) => r.pdType === "SERVICE")
+      .map((svc) => ({
+        id: svc.pdId,
+        name: svc.name || "Unnamed Service",
+        resourceCount: 1,
+      }))
+      .sort((a, b) => a.name.localeCompare(b.name));
 
     return { teams, services };
   }, [domain]);

@@ -29,7 +29,8 @@ type ResourceType =
   | "ESCALATION_POLICY"
   | "USER"
   | "BUSINESS_SERVICE"
-  | "RULESET";
+  | "RULESET"
+  | "EVENT_ORCHESTRATION";
 
 const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
   SERVICE: "Services",
@@ -38,7 +39,8 @@ const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
   ESCALATION_POLICY: "Escalation Policies",
   USER: "Users",
   BUSINESS_SERVICE: "Business Services",
-  RULESET: "Rulesets",
+  EVENT_ORCHESTRATION: "Event Orchestrations",
+  RULESET: "Rulesets (Legacy)",
 };
 
 export default function DomainDetailPage() {
@@ -163,9 +165,9 @@ export default function DomainDetailPage() {
           <div className="grid grid-cols-2 gap-4 md:grid-cols-4">
             <div>
               <p className="text-xs text-zinc-500 font-medium">Status</p>
-              <p className="text-sm font-semibold mt-1">
+              <div className="text-sm font-semibold mt-1">
                 <StatusBadge status={domain.status} />
-              </p>
+              </div>
             </div>
             <div>
               <p className="text-xs text-zinc-500 font-medium">Connected</p>

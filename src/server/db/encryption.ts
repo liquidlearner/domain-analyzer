@@ -96,7 +96,9 @@ export function encryptToken(token: string): Buffer {
  * Decrypt a token from Prisma Bytes storage.
  * Expects the Buffer to contain the encrypted string (iv:tag:ciphertext).
  */
-export function decryptToken(encrypted: Buffer): string {
-  const encryptedString = encrypted.toString('utf8')
+export function decryptToken(encrypted: Buffer | Uint8Array): string {
+  // Prisma Bytes fields may return Uint8Array instead of Buffer
+  const buf = Buffer.isBuffer(encrypted) ? encrypted : Buffer.from(encrypted)
+  const encryptedString = buf.toString('utf8')
   return decrypt(encryptedString)
 }

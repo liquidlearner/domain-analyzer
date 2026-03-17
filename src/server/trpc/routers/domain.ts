@@ -214,8 +214,19 @@ export const domainRouter = router({
         include: { resources: true },
       });
 
-      let resourceCounts = {};
-      let resources = [];
+      let resourceCounts: Record<string, number> = {};
+      let resources: Array<{
+        id: string;
+        snapshotId: string;
+        pdType: string;
+        pdId: string;
+        name: string;
+        teamIds: string[];
+        configJson: Uint8Array;
+        isStale: boolean;
+        lastActivity: Date | null;
+        dependencies: string[];
+      }> = [];
       if (latestSnapshot && typeof latestSnapshot.resourceCounts === "object") {
         resourceCounts = latestSnapshot.resourceCounts as Record<string, number>;
       }
@@ -355,7 +366,16 @@ export const domainRouter = router({
       }
 
       // Decrypt token and test
-      const decryptedToken = decryptToken(domain.apiTokenEnc);
+      let decryptedToken: string;
+      try {
+        decryptedToken = decryptToken(domain.apiTokenEnc);
+      } catch (err) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            "Failed to decrypt API token. Try updating the token or reconnecting the domain.",
+        });
+      }
       const pdClient = new PagerDutyClient({
         token: decryptedToken,
         subdomain: domain.subdomain,
@@ -440,7 +460,17 @@ export const domainRouter = router({
         });
       }
 
-      const token = decryptToken(domain.apiTokenEnc);
+      let token: string;
+      try {
+        token = decryptToken(domain.apiTokenEnc);
+      } catch (err) {
+        throw new TRPCError({
+          code: "INTERNAL_SERVER_ERROR",
+          message:
+            "Failed to decrypt API token. The token may need to be re-entered. " +
+            "Try updating the token or reconnecting the domain.",
+        });
+      }
       const pdClient = new PagerDutyClient({
         token,
         subdomain: domain.subdomain,
@@ -459,42 +489,37 @@ export const domainRouter = router({
         });
       }
 
-      // Pull all resource types from PD
-      const [services, teams, schedules, escalationPolicies, users, businessServices, rulesets] =
-        await Promise.all([
-          pdClient.listServices(),
-          pdClient.listTeams(),
-          pdClient.listSchedules(),
-          pdClient.listEscalationPolicies(),
-          pdClient.listUsers(),
-          pdClient.listBusinessServices(),
-          pdClient.getRulesets(),
-        ]);
+      // Pull all config/structure resource types from PD
+      // NOTE: No incidents are pulled here. Incident data is pulled during
+      // analysis (Module 2) when the user selects scope + time window.
+      const [
+        services,
+        teams,
+        schedules,
+        escalationPolicies,
+        users,
+        businessServices,
+        rulesets,
+        eventOrchestrations,
+      ] = await Promise.all([
+        pdClient.listServices(),
+        pdClient.listTeams(),
+        pdClient.listSchedules(),
+        pdClient.listEscalationPolicies(),
+        pdClient.listUsers(),
+        pdClient.listBusinessServices(),
+        pdClient.getRulesets(),
+        pdClient.listEventOrchestrations(),
+      ]);
 
-      // Check for recent incidents to flag stale services
-      const ninetyDaysAgo = new Date();
-      ninetyDaysAgo.setDate(ninetyDaysAgo.getDate() - 90);
-      const serviceIds = services.map((s) => s.id);
-      let incidents: any[] = [];
-      if (serviceIds.length > 0) {
-        incidents = await pdClient.listIncidents({
-          serviceIds,
-          since: ninetyDaysAgo.toISOString(),
-          until: new Date().toISOString(),
-        });
-      }
-      const servicesWithIncidents = new Set(
-        incidents.map((i: any) => i.service?.id).filter(Boolean)
-      );
-
-      // Build resource records
+      // Build resource records with full PD config stored per resource
       type ResourceEntry = {
         pdId: string;
         type: string;
         name: string;
         teamIds: string[];
         dependencies: string[];
-        isStale: boolean;
+        configJson: Record<string, any>;
       };
       const resources: Record<string, ResourceEntry> = {};
 
@@ -505,7 +530,7 @@ export const domainRouter = router({
           name: s.name || "",
           teamIds: s.teams?.map((t) => t.id) || [],
           dependencies: s.escalation_policy?.id ? [s.escalation_policy.id] : [],
-          isStale: !servicesWithIncidents.has(s.id),
+          configJson: s,
         };
       }
       for (const t of teams) {
@@ -515,7 +540,7 @@ export const domainRouter = router({
           name: t.name || "",
           teamIds: [t.id],
           dependencies: [],
-          isStale: false,
+          configJson: t,
         };
       }
       for (const sch of schedules) {
@@ -523,9 +548,9 @@ export const domainRouter = router({
           pdId: sch.id,
           type: "SCHEDULE",
           name: sch.name || "",
-          teamIds: [],
+          teamIds: sch.teams?.map((t) => t.id) || [],
           dependencies: [],
-          isStale: false,
+          configJson: sch,
         };
       }
       for (const ep of escalationPolicies) {
@@ -545,9 +570,9 @@ export const domainRouter = router({
           pdId: ep.id,
           type: "ESCALATION_POLICY",
           name: ep.name || "",
-          teamIds: [],
+          teamIds: ep.teams?.map((t) => t.id) || [],
           dependencies: deps,
-          isStale: false,
+          configJson: ep,
         };
       }
       for (const u of users) {
@@ -557,7 +582,7 @@ export const domainRouter = router({
           name: u.name || "",
           teamIds: (u as any).teams?.map((t: any) => t.id) || [],
           dependencies: [],
-          isStale: false,
+          configJson: u,
         };
       }
       for (const bs of businessServices) {
@@ -567,7 +592,7 @@ export const domainRouter = router({
           name: bs.name || "",
           teamIds: [],
           dependencies: [],
-          isStale: false,
+          configJson: bs,
         };
       }
       for (const rs of rulesets) {
@@ -575,9 +600,19 @@ export const domainRouter = router({
           pdId: rs.id,
           type: "RULESET",
           name: rs.name || "",
-          teamIds: [],
+          teamIds: rs.teams?.map((t) => t.id) || [],
           dependencies: [],
-          isStale: false,
+          configJson: rs,
+        };
+      }
+      for (const eo of eventOrchestrations) {
+        resources[eo.id] = {
+          pdId: eo.id,
+          type: "EVENT_ORCHESTRATION",
+          name: eo.name || "",
+          teamIds: eo.team?.id ? [eo.team.id] : [],
+          dependencies: [],
+          configJson: eo,
         };
       }
 
@@ -590,9 +625,10 @@ export const domainRouter = router({
         USER: users.length,
         BUSINESS_SERVICE: businessServices.length,
         RULESET: rulesets.length,
+        EVENT_ORCHESTRATION: eventOrchestrations.length,
       };
 
-      // Store snapshot
+      // Store snapshot — resourcesJson contains the full indexed config map
       const snapshot = await ctx.prisma.configSnapshot.create({
         data: {
           domainId,
@@ -600,35 +636,28 @@ export const domainRouter = router({
           terraformState: Buffer.from(JSON.stringify({ placeholder: true })),
           resourcesJson: Buffer.from(JSON.stringify(resources)),
           resourceCounts,
-          staleResources: {
-            total: Object.values(resources).filter((r) => r.isStale).length,
-            byType: Object.values(resources)
-              .filter((r) => r.isStale)
-              .reduce(
-                (acc, r) => {
-                  acc[r.type] = (acc[r.type] || 0) + 1;
-                  return acc;
-                },
-                {} as Record<string, number>
-              ),
-          },
+          staleResources: {}, // Staleness is determined during analysis, not config sync
           status: "COMPLETED",
         },
       });
 
-      // Create individual PdResource records
-      for (const resource of Object.values(resources)) {
-        await ctx.prisma.pdResource.create({
-          data: {
+      // Create individual PdResource records with full PD config stored
+      // Use createMany for performance on large domains
+      const resourceEntries = Object.values(resources);
+      const BATCH_SIZE = 50;
+      for (let i = 0; i < resourceEntries.length; i += BATCH_SIZE) {
+        const batch = resourceEntries.slice(i, i + BATCH_SIZE);
+        await ctx.prisma.pdResource.createMany({
+          data: batch.map((resource) => ({
             snapshotId: snapshot.id,
             pdType: resource.type as any,
             pdId: resource.pdId,
             name: resource.name,
             teamIds: resource.teamIds,
-            configJson: Buffer.from(JSON.stringify(resource)),
-            isStale: resource.isStale,
+            configJson: Buffer.from(JSON.stringify(resource.configJson)),
+            isStale: false, // Determined during analysis
             dependencies: resource.dependencies,
-          },
+          })),
         });
       }
 

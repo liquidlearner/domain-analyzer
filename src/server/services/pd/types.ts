@@ -254,6 +254,25 @@ export interface PDRuleset {
   teams?: PDTeam[];
 }
 
+export interface PDEventOrchestration {
+  id: string;
+  name: string;
+  description?: string;
+  self?: string;
+  team?: { id: string; type: string; summary?: string } | null;
+  integrations?: Array<{
+    id: string;
+    type?: string;
+    parameters?: { routing_key?: string; type?: string };
+  }>;
+  routes?: number;
+  created_at?: string;
+  created_by?: { id: string; type: string; self?: string };
+  updated_at?: string;
+  updated_by?: { id: string; type: string; self?: string };
+  version?: string;
+}
+
 export interface PDPaginatedResponse<T> {
   limit: number;
   offset: number;

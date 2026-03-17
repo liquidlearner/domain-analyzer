@@ -10,6 +10,7 @@ import type {
   PDLogEntry,
   PDAnalyticsIncident,
   PDRuleset,
+  PDEventOrchestration,
   PDPaginatedResponse,
 } from "./types";
 
@@ -211,10 +212,25 @@ export class PagerDutyClient {
   }
 
   /**
-   * Get Event Orchestration rulesets
+   * Get legacy rulesets (deprecated, but some accounts still have them)
    */
   async getRulesets(): Promise<PDRuleset[]> {
-    return this.paginateAll<PDRuleset>("/rulesets", "rulesets");
+    try {
+      return await this.paginateAll<PDRuleset>("/rulesets", "rulesets");
+    } catch {
+      // Rulesets API may 404 on newer accounts
+      return [];
+    }
+  }
+
+  /**
+   * List all Event Orchestrations (global)
+   */
+  async listEventOrchestrations(): Promise<PDEventOrchestration[]> {
+    return this.paginateAll<PDEventOrchestration>(
+      "/event_orchestrations",
+      "orchestrations"
+    );
   }
 
   /**
