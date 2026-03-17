@@ -7,6 +7,9 @@ export interface NoiseAnalysis {
   transientAlerts: { serviceId: string; serviceName: string; count: number; avgDurationMinutes: number }[]
   overallNoiseRatio: number // 0-1, percentage that's noise
   logEntriesAvailable: boolean // whether log entry data was available for accurate noise detection
+  apiResolvedPercent: number // % of resolved incidents resolved via API (not human)
+  apiResolvedCount: number // raw count
+  totalResolved: number // total resolved incidents
 }
 
 export function analyzeNoise(
@@ -16,6 +19,8 @@ export function analyzeNoise(
   let autoResolvedCount = 0
   let ackNoActionCount = 0
   let escalatedCount = 0
+  let apiResolvedCount = 0
+  let totalResolved = 0
   let ackTimes: number[] = []
   let resolveTimes: number[] = []
   let transientAlertsMap = new Map<string, { count: number; durations: number[] }>()
@@ -43,9 +48,26 @@ export function analyzeNoise(
     const isAcknowledged = incident.status === 'acknowledged'
     const incidentId = incident.id
 
-    // Track resolve time
-    if (isResolved && resolvedAt > createdAt) {
-      resolveTimes.push(resolvedAt - createdAt)
+    // Track resolve time and API resolves
+    if (isResolved) {
+      totalResolved++
+      if (resolvedAt > createdAt) {
+        resolveTimes.push(resolvedAt - createdAt)
+      }
+      // Detect API-resolved incidents: last_status_change_by is a service (API/integration)
+      // rather than a user. This indicates automation or an external tool resolved the incident.
+      const resolvedByType = incident.last_status_change_by?.type || ''
+      const resolvedBySummary = (incident.last_status_change_by?.summary || '').toLowerCase()
+      const isApiResolve =
+        resolvedByType === 'service_reference' ||
+        resolvedByType === 'integration_reference' ||
+        resolvedByType === 'api_token_reference' ||
+        resolvedBySummary.includes('api') ||
+        resolvedBySummary.includes('automation') ||
+        resolvedBySummary.includes('integration')
+      if (isApiResolve) {
+        apiResolvedCount++
+      }
     }
 
     // Get log entries for this incident
@@ -142,6 +164,9 @@ export function analyzeNoise(
   const overallNoiseRatio =
     totalIncidents > 0 ? noiseIndicators / totalIncidents : 0
 
+  const apiResolvedPercent =
+    totalResolved > 0 ? (apiResolvedCount / totalResolved) * 100 : 0
+
   return {
     autoResolvedPercent,
     ackNoActionPercent,
@@ -151,5 +176,8 @@ export function analyzeNoise(
     transientAlerts,
     overallNoiseRatio,
     logEntriesAvailable: hasLogEntries,
+    apiResolvedPercent,
+    apiResolvedCount,
+    totalResolved,
   }
 }

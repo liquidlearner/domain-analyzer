@@ -23,6 +23,9 @@ export default function OverviewTab({ evaluation, analysisData }: OverviewTabPro
     mtta,
     mttr,
     autoResolved,
+    apiResolvedPercent,
+    apiResolvedCount,
+    totalResolvedCount,
     pilotTeam,
     timelineEstimate,
     mappingBreakdown,
@@ -70,6 +73,9 @@ export default function OverviewTab({ evaluation, analysisData }: OverviewTabPro
     const mtta = noise?.meanTimeToAck || 0;
     const mttr = noise?.meanTimeToResolve || 0;
     const autoResolved = noise?.autoResolvedPercent || 0;
+    const apiResolvedPercent = noise?.apiResolvedPercent || 0;
+    const apiResolvedCount = noise?.apiResolvedCount || 0;
+    const totalResolvedCount = noise?.totalResolved || 0;
 
     // Project plan
     const pilotTeam = projectPlan?.pilotRecommendations?.[0]?.teamName || null;
@@ -97,6 +103,9 @@ export default function OverviewTab({ evaluation, analysisData }: OverviewTabPro
       mtta,
       mttr,
       autoResolved,
+      apiResolvedPercent,
+      apiResolvedCount,
+      totalResolvedCount,
       pilotTeam,
       timelineEstimate,
       mappingBreakdown,
@@ -225,7 +234,7 @@ export default function OverviewTab({ evaluation, analysisData }: OverviewTabPro
             </div>
 
             {/* Risk indicators */}
-            <div className="grid grid-cols-3 gap-4 mt-6 pt-4 border-t border-current/10">
+            <div className="grid grid-cols-4 gap-4 mt-6 pt-4 border-t border-current/10">
               <div>
                 <p className="text-xs opacity-75">MTTA</p>
                 <p className="font-semibold text-sm mt-1">{formatSeconds(mtta)}</p>
@@ -237,6 +246,10 @@ export default function OverviewTab({ evaluation, analysisData }: OverviewTabPro
               <div>
                 <p className="text-xs opacity-75">Auto-resolved</p>
                 <p className="font-semibold text-sm mt-1">{autoResolved.toFixed(1)}%</p>
+              </div>
+              <div>
+                <p className="text-xs opacity-75">API-Resolved</p>
+                <p className={`font-semibold text-sm mt-1 ${apiResolvedPercent > 75 ? "text-amber-600" : ""}`}>{apiResolvedPercent.toFixed(1)}%</p>
               </div>
             </div>
           </div>
@@ -332,6 +345,15 @@ export default function OverviewTab({ evaluation, analysisData }: OverviewTabPro
                     : maintenanceBurden === "medium"
                       ? " — moderate custom tooling to address during migration"
                       : " — minimal custom dependencies"}
+                </p>
+              </div>
+            )}
+            {apiResolvedPercent > 50 && (
+              <div className="flex items-start gap-3">
+                <Zap className="h-4 w-4 text-amber-600 mt-0.5 flex-shrink-0" />
+                <p className="text-sm text-zinc-800">
+                  <strong>{apiResolvedPercent.toFixed(0)}% of incidents resolved via API</strong> ({apiResolvedCount} of {totalResolvedCount})
+                  — external automation is handling incident resolution, indicating a shadow tool stack managing the incident lifecycle outside PagerDuty
                 </p>
               </div>
             )}

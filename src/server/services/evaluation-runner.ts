@@ -337,6 +337,9 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
       meanTimeToAck: noiseAnalysis.meanTimeToAck,
       meanTimeToResolve: noiseAnalysis.meanTimeToResolve,
       overallNoiseRatio: noiseAnalysis.overallNoiseRatio,
+      apiResolvedPercent: noiseAnalysis.apiResolvedPercent,
+      apiResolvedCount: noiseAnalysis.apiResolvedCount,
+      totalResolved: noiseAnalysis.totalResolved,
     }
 
     const shadowSignals = shadowStackAnalysis.signals.map((s) => s.type)

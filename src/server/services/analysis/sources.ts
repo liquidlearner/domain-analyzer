@@ -68,6 +68,33 @@ export function analyzeSources(
     return null
   }
 
+  // Helper: extract the real source from the incident's trigger log entry channel
+  function getSourceFromChannel(incident: any): string | null {
+    const channel = incident.first_trigger_log_entry?.channel
+    if (!channel) return null
+
+    // CEF (Common Event Format) source_component is the most reliable field
+    // This is set by the monitoring tool when sending events via Events API v2
+    const cefSource = channel.cef_details?.source_component
+    if (cefSource && !GENERIC_INTEGRATION_NAMES.has(cefSource.toLowerCase())) {
+      return cefSource
+    }
+
+    // Some integrations set a direct source field on the channel
+    const directSource = channel.source
+    if (directSource && !GENERIC_INTEGRATION_NAMES.has(directSource.toLowerCase())) {
+      return directSource
+    }
+
+    // Check channel details for source info
+    const detailSource = channel.details?.source
+    if (detailSource && !GENERIC_INTEGRATION_NAMES.has(detailSource.toLowerCase())) {
+      return detailSource
+    }
+
+    return null
+  }
+
   // Analyze incidents to identify sources
   incidents.forEach((incident: any) => {
     const serviceId = incident.service?.id || 'unknown'
@@ -75,12 +102,28 @@ export function analyzeSources(
     let sourceType = 'unknown'
 
     const channelType = incident.first_trigger_log_entry?.channel?.type
+    const channelSource = getSourceFromChannel(incident)
 
-    // Priority 1: Service receives events via Global Event Orchestration dynamic routing
-    if (eoRoutedServices.has(serviceId)) {
+    // Priority 1: Real source from incident payload channel data (most reliable)
+    // The .source / .cef_details.source_component field contains the actual monitoring tool name
+    if (channelSource) {
+      sourceName = channelSource
+      sourceType = 'monitoring'
+      totalFromMonitoring++
+      // If this service is also EO-routed, annotate that in the source name
+      if (eoRoutedServices.has(serviceId)) {
+        const eoInfo = serviceToEoInfo.get(serviceId)
+        const eoName = eoInfo?.eoName || 'Event Orchestration'
+        sourceName = `${channelSource} (via ${eoName})`
+        sourceType = 'event_orchestration'
+        totalFromOrchestration++
+        totalFromMonitoring-- // undo the monitoring count
+      }
+    }
+    // Priority 2: EO-routed service but no channel source available
+    else if (eoRoutedServices.has(serviceId)) {
       const eoInfo = serviceToEoInfo.get(serviceId)
       const eoName = eoInfo?.eoName || 'Global Event Orchestration'
-      // Try to identify upstream source from EO integration names
       if (eoInfo?.eoIntegrationNames && eoInfo.eoIntegrationNames.length > 0) {
         sourceName = `${eoInfo.eoIntegrationNames[0]} (via ${eoName})`
       } else {
@@ -89,13 +132,13 @@ export function analyzeSources(
       sourceType = 'event_orchestration'
       totalFromOrchestration++
     }
-    // Priority 2: API-created incidents (explicit API channel)
+    // Priority 3: API-created incidents (explicit API channel)
     else if (channelType === 'api') {
       sourceType = 'api'
       sourceName = 'Direct API'
       totalFromApi++
     }
-    // Priority 3: Email-created incidents
+    // Priority 4: Email-created incidents
     else if (
       channelType === 'email' ||
       incident.channels?.some((ch: any) => ch.type === 'email_log_entry')
@@ -104,10 +147,8 @@ export function analyzeSources(
       sourceName = 'Email Integration'
       totalFromEmail++
     }
-    // Priority 4: Events API v2 / Events API channel type
-    // This fires for events sent via routing keys (including through Global EOs)
+    // Priority 5: Events API v2 / Events API channel type — check for vendor on service
     else if (channelType === 'events_api_v2' || channelType === 'events_api') {
-      // Check if there's a real vendor integration on this service
       const realVendor = getRealVendorIntegration(serviceId)
       if (realVendor) {
         sourceName = realVendor
@@ -119,16 +160,14 @@ export function analyzeSources(
         totalFromApi++
       }
     }
-    // Priority 5: Real vendor integrations on the service (not generic ones)
+    // Priority 6: Real vendor integrations on the service (not generic ones)
     else {
       const realVendor = getRealVendorIntegration(serviceId)
       if (realVendor) {
         sourceName = realVendor
         sourceType = 'monitoring'
         totalFromMonitoring++
-      }
-      // Fallback: unknown source
-      else {
+      } else {
         sourceType = 'monitoring'
         sourceName = 'Monitoring Integration'
         totalFromMonitoring++

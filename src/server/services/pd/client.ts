@@ -191,6 +191,8 @@ export class PagerDutyClient {
     const requestParams: Record<string, any> = {
       since: params.since,
       until: params.until,
+      // Expand first_trigger_log_entry to get channel details including source
+      include: ['first_trigger_log_entry'],
     };
 
     if (params.teamIds && params.teamIds.length > 0) {

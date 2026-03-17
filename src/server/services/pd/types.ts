@@ -158,6 +158,24 @@ export interface PDIncident {
     type: string;
     summary: string;
     self: string;
+    // Expanded fields when include[]=first_trigger_log_entry
+    channel?: {
+      type?: string;
+      summary?: string;
+      details_omitted?: boolean;
+      // CEF (Common Event Format) details — contains source info
+      cef_details?: {
+        source_component?: string; // The actual monitoring tool name (e.g., "Datadog", "CloudWatch")
+        source_origin?: string;
+        event_class?: string;
+        severity?: string;
+        dedup_key?: string;
+        details?: Record<string, any>;
+      };
+      // Direct source field on some channel types
+      source?: string;
+      details?: Record<string, any>;
+    };
   };
   escalation_policy?: PDEscalationPolicy;
   teams?: PDTeam[];

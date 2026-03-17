@@ -78,6 +78,9 @@ export default function VolumeNoiseTab({ evaluation, analysisData }: VolumeNoise
       escalated: noise?.escalatedPercent ?? 0,
       mtta: noise?.meanTimeToAck ?? 0,
       mttr: noise?.meanTimeToResolve ?? 0,
+      apiResolved: noise?.apiResolvedPercent ?? 0,
+      apiResolvedCount: noise?.apiResolvedCount ?? 0,
+      totalResolved: noise?.totalResolved ?? 0,
     };
 
     return { volumeData, noisiestData, heatmapGrid, severityData, noiseMetrics };
@@ -237,7 +240,7 @@ export default function VolumeNoiseTab({ evaluation, analysisData }: VolumeNoise
       )}
 
       {/* Noise Breakdown Cards */}
-      <div className="grid grid-cols-2 gap-4 lg:grid-cols-5">
+      <div className="grid grid-cols-2 gap-4 lg:grid-cols-3">
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-xs font-medium text-zinc-600">Auto-resolved %</CardTitle>
@@ -276,6 +279,22 @@ export default function VolumeNoiseTab({ evaluation, analysisData }: VolumeNoise
           </CardHeader>
           <CardContent>
             <p className="text-2xl font-bold text-zinc-900">{formatSeconds(noiseMetrics.mttr)}</p>
+          </CardContent>
+        </Card>
+        <Card className={noiseMetrics.apiResolved > 50 ? "border-amber-300 bg-amber-50" : ""}>
+          <CardHeader className="pb-3">
+            <CardTitle className="text-xs font-medium text-zinc-600">API-Resolved %</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <p className="text-2xl font-bold text-zinc-900">{noiseMetrics.apiResolved.toFixed(1)}%</p>
+            <p className="text-xs text-zinc-500 mt-1">
+              {noiseMetrics.apiResolvedCount} of {noiseMetrics.totalResolved} resolved
+            </p>
+            {noiseMetrics.apiResolved > 75 && (
+              <p className="text-xs text-amber-700 mt-2 font-medium">
+                External automation likely handling resolution
+              </p>
+            )}
           </CardContent>
         </Card>
       </div>
