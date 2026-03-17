@@ -27,11 +27,14 @@ enum PdResourceType {
   BUSINESS_SERVICE
   ESCALATION_POLICY
   EVENT_ORCHESTRATION
+  EXTENSION
+  INCIDENT_WORKFLOW
   RULESET
   SCHEDULE
   SERVICE
   TEAM
   USER
+  WEBHOOK_SUBSCRIPTION
 }
 
 enum ConfigSnapshotStatus {
@@ -129,6 +132,7 @@ model ConfigSnapshot {
   resources    PdResource[]
   evaluations  Evaluation[]
 
+  @@index([domainId, capturedAt])
   @@map("config_snapshots")
 }
 
@@ -148,6 +152,7 @@ model PdResource {
   migrationMappings MigrationMapping[]
 
   @@unique([snapshotId, pdId])
+  @@index([snapshotId, pdType])
   @@map("pd_resources")
 }
 
@@ -171,6 +176,8 @@ model Evaluation {
   incidentAnalyses      IncidentAnalysis[]
   migrationMappings     MigrationMapping[]
 
+  @@index([domainId])
+  @@index([status])
   @@map("evaluations")
 }
 
@@ -209,6 +216,7 @@ model MigrationMapping {
   evaluation Evaluation   @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
   pdResource PdResource   @relation(fields: [pdResourceId], references: [id], onDelete: Cascade)
 
+  @@index([evaluationId])
   @@map("migration_mappings")
 }
 

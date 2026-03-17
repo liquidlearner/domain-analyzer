@@ -273,6 +273,68 @@ export interface PDEventOrchestration {
   version?: string;
 }
 
+export interface PDExtension {
+  id: string;
+  type: "extension_reference" | "extension";
+  summary?: string;
+  self: string;
+  html_url?: string;
+  name?: string;
+  endpoint_url?: string;
+  extension_objects?: Array<{
+    id: string;
+    type: string;
+    summary?: string;
+    self?: string;
+  }>;
+  extension_schema?: {
+    id: string;
+    type: string;
+    summary?: string;
+    self?: string;
+  };
+  temporarily_disabled?: boolean;
+  config?: Record<string, any>;
+}
+
+export interface PDWebhookSubscription {
+  id: string;
+  type: string;
+  active?: boolean;
+  delivery_method?: {
+    type: string;
+    url?: string;
+    temporarily_disabled?: boolean;
+  };
+  description?: string;
+  events?: string[];
+  filter?: {
+    id?: string;
+    type?: string;
+  };
+}
+
+export interface PDIncidentWorkflow {
+  id: string;
+  type?: string;
+  name?: string;
+  description?: string;
+  created_at?: string;
+  steps?: Array<{
+    id: string;
+    name: string;
+    action_configuration?: {
+      action_id?: string;
+      description?: string;
+    };
+  }>;
+  team?: {
+    id: string;
+    type: string;
+    summary?: string;
+  };
+}
+
 export interface PDPaginatedResponse<T> {
   limit: number;
   offset: number;

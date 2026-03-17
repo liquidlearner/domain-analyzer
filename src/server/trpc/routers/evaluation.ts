@@ -3,13 +3,14 @@ import { router, protectedProcedure, seProcedure, adminProcedure } from '../trpc
 import { prisma } from '@/server/db/client'
 import { TRPCError } from '@trpc/server'
 import { runEvaluationAnalysis } from '@/server/services/evaluation-runner'
+import { decompressJson } from '@/lib/compression'
 
 // Input validators
 const createEvaluationInput = z.object({
   domainId: z.string().cuid(),
   scopeType: z.enum(['TEAM', 'SERVICE']),
   scopeIds: z.array(z.string()).min(1),
-  timeRangeDays: z.enum(['30', '90', '365']).default('30'),
+  timeRangeDays: z.enum(['7', '30', '90', '365']).default('30'),
 })
 
 const evaluationIdInput = z.object({
@@ -118,6 +119,7 @@ export const evaluationRouter = router({
             },
           },
           incidentAnalyses: {
+            take: 1,
             orderBy: { periodStart: 'desc' },
           },
           migrationMappings: {
@@ -156,6 +158,59 @@ export const evaluationRouter = router({
       }
 
       return evaluation
+    }),
+
+  /**
+   * Get deserialized analysis data for a completed evaluation.
+   * Reads sourcesJson + patternsJson from IncidentAnalysis and returns typed JSON
+   * so the client never has to handle raw Bytes.
+   */
+  getAnalysisData: protectedProcedure
+    .input(evaluationIdInput)
+    .query(async ({ input }) => {
+      const { id } = input
+
+      const analysis = await prisma.incidentAnalysis.findFirst({
+        where: { evaluationId: id },
+        orderBy: { periodStart: 'desc' },
+      })
+
+      if (!analysis) return null
+
+      let sourcesData: any = {}
+      let patternsData: any = {}
+
+      try {
+        sourcesData = decompressJson(analysis.sourcesJson)
+      } catch {
+        // sourcesJson parse failed
+      }
+
+      try {
+        patternsData = decompressJson(analysis.patternsJson)
+      } catch {
+        // patternsJson parse failed
+      }
+
+      return {
+        volume: sourcesData.volume || null,
+        sources: sourcesData.sources || null,
+        risk: sourcesData.risk || null,
+        shadowStack: sourcesData.shadowStack || null,
+        projectPlan: sourcesData.projectPlan || null,
+        noise: patternsData,
+        scopedCounts: sourcesData.scopedCounts || null,
+        meta: {
+          incidentCount: analysis.incidentCount,
+          alertCount: analysis.alertCount,
+          noiseRatio: analysis.noiseRatio,
+          mttrP50: analysis.mttrP50,
+          mttrP95: analysis.mttrP95,
+          periodStart: analysis.periodStart,
+          periodEnd: analysis.periodEnd,
+          shadowSignals: analysis.shadowSignals,
+        },
+      }
     }),
 
   /**

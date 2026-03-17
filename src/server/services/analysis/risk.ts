@@ -64,13 +64,18 @@ export function analyzeRisk(
 
   // Risk 4: Complex Event Orchestration rules
   const complexEoRulesets = resources.filter((res: any) => {
-    return (
-      res.pdType === 'RULESET' &&
-      res.configJson &&
-      (typeof res.configJson === 'string'
-        ? JSON.parse(res.configJson).routing_keys?.length > 5
-        : res.configJson.routing_keys?.length > 5)
-    )
+    try {
+      if (res.pdType !== 'RULESET' || !res.configJson) return false
+      const raw = res.configJson
+      const config = Buffer.isBuffer(raw)
+        ? JSON.parse(raw.toString('utf-8'))
+        : typeof raw === 'string'
+          ? JSON.parse(raw)
+          : raw
+      return config?.routing_keys?.length > 5
+    } catch {
+      return false
+    }
   })
 
   complexEoRulesets.forEach((ruleset: any) => {
@@ -111,8 +116,18 @@ export function analyzeRisk(
   // Risk 6: Complex escalation structures
   const escalationPolicies = resources.filter((res: any) => res.pdType === 'ESCALATION_POLICY')
   const complexEsps = escalationPolicies.filter((ep: any) => {
-    const configJson = typeof ep.configJson === 'string' ? JSON.parse(ep.configJson) : ep.configJson
-    return configJson.escalation_rules?.length > 5 || configJson.num_loops > 2
+    try {
+      const raw = ep.configJson
+      const configJson = Buffer.isBuffer(raw)
+        ? JSON.parse(raw.toString('utf-8'))
+        : typeof raw === 'string'
+          ? JSON.parse(raw)
+          : raw
+      if (!configJson) return false
+      return configJson.escalation_rules?.length > 5 || configJson.num_loops > 2
+    } catch {
+      return false
+    }
   })
 
   if (complexEsps.length > 0) {

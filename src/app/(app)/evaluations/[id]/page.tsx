@@ -14,7 +14,7 @@ import OverviewTab from "./tabs/overview";
 import ConfigMapTab from "./tabs/config-map";
 import VolumeNoiseTab from "./tabs/volume-noise";
 import AlertSourcesTab from "./tabs/alert-sources";
-import ShadowStackTab from "./tabs/shadow-stack";
+import ToolStackTab from "./tabs/tool-stack";
 import MigrationPlanTab from "./tabs/migration-plan";
 
 interface ProgressData {
@@ -134,6 +134,13 @@ export default function EvaluationPage() {
     }
   };
 
+  // Fetch deserialized analysis data for completed evaluations
+  // Must be before any early returns to maintain consistent hook order
+  const { data: analysisData } = trpc.evaluation.getAnalysisData.useQuery(
+    { id: evaluationId },
+    { enabled: evaluation?.status === "COMPLETED" }
+  );
+
   if (isLoading) {
     return (
       <div className="flex items-center justify-center p-8">
@@ -223,12 +230,12 @@ export default function EvaluationPage() {
             <TabsTrigger value="config-map">Config Map</TabsTrigger>
             <TabsTrigger value="volume-noise">Volume & Noise</TabsTrigger>
             <TabsTrigger value="sources">Alert Sources</TabsTrigger>
-            <TabsTrigger value="shadow-stack">Shadow Stack</TabsTrigger>
+            <TabsTrigger value="tool-stack">Tool Stack</TabsTrigger>
             <TabsTrigger value="migration">Migration Plan</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview">
-            <OverviewTab evaluation={evaluation} />
+            <OverviewTab evaluation={evaluation} analysisData={analysisData} />
           </TabsContent>
 
           <TabsContent value="config-map">
@@ -236,19 +243,19 @@ export default function EvaluationPage() {
           </TabsContent>
 
           <TabsContent value="volume-noise">
-            <VolumeNoiseTab evaluation={evaluation} />
+            <VolumeNoiseTab evaluation={evaluation} analysisData={analysisData} />
           </TabsContent>
 
           <TabsContent value="sources">
-            <AlertSourcesTab evaluation={evaluation} />
+            <AlertSourcesTab evaluation={evaluation} analysisData={analysisData} />
           </TabsContent>
 
-          <TabsContent value="shadow-stack">
-            <ShadowStackTab evaluation={evaluation} />
+          <TabsContent value="tool-stack">
+            <ToolStackTab evaluation={evaluation} analysisData={analysisData} />
           </TabsContent>
 
           <TabsContent value="migration">
-            <MigrationPlanTab evaluation={evaluation} />
+            <MigrationPlanTab evaluation={evaluation} analysisData={analysisData} />
           </TabsContent>
         </Tabs>
       )}

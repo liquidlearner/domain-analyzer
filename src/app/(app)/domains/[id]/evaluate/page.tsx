@@ -27,6 +27,7 @@ interface ScopeOption {
 }
 
 const TIME_RANGE_OPTIONS = [
+  { label: "7 Days", value: "7" },
   { label: "30 Days", value: "30" },
   { label: "90 Days", value: "90" },
   { label: "12 Months", value: "365" },
@@ -46,7 +47,7 @@ export default function EvaluatePage() {
 
   const [scopeType, setScopeType] = useState<"TEAM" | "SERVICE">("SERVICE");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [timeRange, setTimeRange] = useState<"30" | "90" | "365">("90");
+  const [timeRange, setTimeRange] = useState<"7" | "30" | "90" | "365">("90");
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set());
 
@@ -278,10 +279,18 @@ export default function EvaluatePage() {
                         <p className="text-xs text-zinc-500">{option.resourceCount} resources</p>
                       </div>
                     </div>
-                    <button
+                    <div
+                      role="button"
+                      tabIndex={0}
                       onClick={(e) => {
                         e.stopPropagation();
                         toggleDetails(option.id);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "Enter" || e.key === " ") {
+                          e.stopPropagation();
+                          toggleDetails(option.id);
+                        }
                       }}
                       className="p-1 text-zinc-400 hover:text-zinc-600"
                     >
@@ -290,7 +299,7 @@ export default function EvaluatePage() {
                           expandedDetails.has(option.id) ? "rotate-180" : ""
                         }`}
                       />
-                    </button>
+                    </div>
                   </button>
 
                   {/* Details Row */}
@@ -324,7 +333,7 @@ export default function EvaluatePage() {
             {TIME_RANGE_OPTIONS.map((option) => (
               <button
                 key={option.value}
-                onClick={() => setTimeRange(option.value as "30" | "90" | "365")}
+                onClick={() => setTimeRange(option.value as "7" | "30" | "90" | "365")}
                 className={`p-4 rounded-lg border-2 text-center transition-colors ${
                   timeRange === option.value
                     ? "border-primary bg-primary-light"

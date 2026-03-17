@@ -211,18 +211,30 @@ export const domainRouter = router({
         where: { domainId: id },
         orderBy: { capturedAt: "desc" },
         take: 1,
-        include: { resources: true },
+        include: {
+          resources: {
+            select: {
+              id: true,
+              pdType: true,
+              pdId: true,
+              name: true,
+              teamIds: true,
+              isStale: true,
+              lastActivity: true,
+              dependencies: true,
+              // Omit configJson — too heavy for listing (2-5KB per resource)
+            },
+          },
+        },
       });
 
       let resourceCounts: Record<string, number> = {};
       let resources: Array<{
         id: string;
-        snapshotId: string;
         pdType: string;
         pdId: string;
         name: string;
         teamIds: string[];
-        configJson: Uint8Array;
         isStale: boolean;
         lastActivity: Date | null;
         dependencies: string[];
@@ -665,25 +677,23 @@ export const domainRouter = router({
         },
       });
 
-      // Create individual PdResource records with full PD config stored
-      // Use interactive transaction to properly handle Bytes fields
+      // Create individual PdResource records in batches for performance
+      const CHUNK_SIZE = 500;
       const resourceEntries = Object.values(resources);
-      await ctx.prisma.$transaction(async (tx) => {
-        for (const resource of resourceEntries) {
-          await tx.pdResource.create({
-            data: {
-              snapshotId: snapshot.id,
-              pdType: resource.type as any,
-              pdId: resource.pdId,
-              name: resource.name,
-              teamIds: resource.teamIds,
-              configJson: Buffer.from(JSON.stringify(resource.configJson)),
-              isStale: false,
-              dependencies: resource.dependencies,
-            },
-          });
-        }
-      }, { timeout: 60000 }); // 60s timeout for large domains
+      for (let i = 0; i < resourceEntries.length; i += CHUNK_SIZE) {
+        await ctx.prisma.pdResource.createMany({
+          data: resourceEntries.slice(i, i + CHUNK_SIZE).map((resource) => ({
+            snapshotId: snapshot.id,
+            pdType: resource.type as any,
+            pdId: resource.pdId,
+            name: resource.name,
+            teamIds: resource.teamIds,
+            configJson: Buffer.from(JSON.stringify(resource.configJson)),
+            isStale: false,
+            dependencies: resource.dependencies,
+          })),
+        });
+      }
 
       // Update domain validation timestamp
       await ctx.prisma.pdDomain.update({

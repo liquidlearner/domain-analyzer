@@ -160,7 +160,97 @@ export const configExport = inngest.createFunction(
         return result
       })
 
-      // Step 9: Build snapshot
+      // Step 9: Pull extensions (ServiceNow, Slack, JIRA, etc.)
+      const extensions = await step.run('pull-extensions', async () => {
+        try {
+          const result = await pdClient.listExtensions()
+          jobProgress.updateProgress(domainId, {
+            status: 'running',
+            progress: 77,
+            message: `Fetched ${result.length} extensions`,
+          })
+          return result
+        } catch {
+          return []
+        }
+      })
+
+      // Step 10: Pull webhook subscriptions
+      const webhookSubscriptions = await step.run('pull-webhook-subscriptions', async () => {
+        const result = await pdClient.listWebhookSubscriptions()
+        jobProgress.updateProgress(domainId, {
+          status: 'running',
+          progress: 78,
+          message: `Fetched ${result.length} webhook subscriptions`,
+        })
+        return result
+      })
+
+      // Step 11: Pull incident workflows
+      const incidentWorkflows = await step.run('pull-incident-workflows', async () => {
+        const result = await pdClient.listIncidentWorkflows()
+        jobProgress.updateProgress(domainId, {
+          status: 'running',
+          progress: 79,
+          message: `Fetched ${result.length} incident workflows`,
+        })
+        return result
+      })
+
+      // Step 12: Pull Event Orchestrations with router rules (reveals dynamic routing)
+      const eventOrchestrations = await step.run('pull-event-orchestrations', async () => {
+        try {
+          const eos = await pdClient.listEventOrchestrations()
+          jobProgress.updateProgress(domainId, {
+            status: 'running',
+            progress: 79,
+            message: `Fetched ${eos.length} event orchestrations, pulling router rules...`,
+          })
+
+          // Pull router rules in parallel to discover which services each EO routes to
+          const routerResults = await Promise.allSettled(
+            eos.map((eo) => pdClient.getOrchestrationRouter(eo.id))
+          )
+
+          const enrichedEos = eos.map((eo, i) => {
+            const routerResult = routerResults[i]
+            const routerRules = routerResult.status === 'fulfilled' ? routerResult.value : null
+
+            // Extract service IDs that this orchestration dynamically routes to
+            const routedServiceIds: string[] = []
+            if (routerRules?.sets) {
+              for (const set of routerRules.sets) {
+                for (const rule of (set.rules || [])) {
+                  const serviceId = rule?.actions?.route_to?.service?.id
+                  if (serviceId) routedServiceIds.push(serviceId)
+                }
+              }
+            }
+            // Also check catch_all
+            if (routerRules?.catch_all?.actions?.route_to?.service?.id) {
+              routedServiceIds.push(routerRules.catch_all.actions.route_to.service.id)
+            }
+
+            return {
+              ...eo,
+              _routerRules: routerRules,
+              _routedServiceIds: routedServiceIds,
+            }
+          })
+
+          jobProgress.updateProgress(domainId, {
+            status: 'running',
+            progress: 80,
+            message: `Fetched ${eos.length} event orchestrations with router rules`,
+          })
+
+          return enrichedEos
+        } catch {
+          return []
+        }
+      })
+
+      // Step 13: Build snapshot
       const snapshot = await step.run('build-snapshot', async () => {
         jobProgress.updateProgress(domainId, {
           status: 'running',
@@ -290,6 +380,58 @@ export const configExport = inngest.createFunction(
           }
         }
 
+        // Add extensions (ServiceNow, Slack, JIRA, MS Teams, etc.)
+        for (const ext of extensions) {
+          const extServiceIds = (ext.extension_objects || [])
+            .filter((eo: any) => eo.type === 'service_reference')
+            .map((eo: any) => eo.id)
+          resources[ext.id] = {
+            pdId: ext.id,
+            type: 'EXTENSION',
+            name: ext.name || ext.extension_schema?.summary || 'Extension',
+            teamIds: [],
+            dependencies: extServiceIds,
+            isStale: ext.temporarily_disabled || false,
+          }
+        }
+
+        // Add webhook subscriptions
+        for (const wh of webhookSubscriptions) {
+          resources[wh.id] = {
+            pdId: wh.id,
+            type: 'WEBHOOK_SUBSCRIPTION',
+            name: wh.description || `Webhook → ${wh.delivery_method?.url || 'unknown'}`,
+            teamIds: [],
+            dependencies: wh.filter?.id ? [wh.filter.id] : [],
+            isStale: !wh.active,
+          }
+        }
+
+        // Add incident workflows
+        for (const wf of incidentWorkflows) {
+          resources[wf.id] = {
+            pdId: wf.id,
+            type: 'INCIDENT_WORKFLOW',
+            name: wf.name || 'Incident Workflow',
+            teamIds: wf.team?.id ? [wf.team.id] : [],
+            dependencies: [],
+            isStale: false,
+          }
+        }
+
+        // Add event orchestrations with router rules (dynamic routing detection)
+        for (const eo of eventOrchestrations) {
+          const routedServiceIds: string[] = (eo as any)._routedServiceIds || []
+          resources[eo.id] = {
+            pdId: eo.id,
+            type: 'EVENT_ORCHESTRATION',
+            name: eo.name || 'Event Orchestration',
+            teamIds: eo.team?.id ? [eo.team.id] : [],
+            dependencies: routedServiceIds, // Services this EO routes to
+            isStale: false,
+          }
+        }
+
         // Prepare stale resources summary
         const staleResources = Object.values(resources).filter((r) => r.isStale)
         const staleResourcesSummary = {
@@ -312,6 +454,10 @@ export const configExport = inngest.createFunction(
           users: users.length,
           businessServices: businessServices.length,
           rulesets: rulesets.length,
+          extensions: extensions.length,
+          webhookSubscriptions: webhookSubscriptions.length,
+          incidentWorkflows: incidentWorkflows.length,
+          eventOrchestrations: eventOrchestrations.length,
           total:
             services.length +
             teams.length +
@@ -319,7 +465,11 @@ export const configExport = inngest.createFunction(
             escalationPolicies.length +
             users.length +
             businessServices.length +
-            rulesets.length,
+            rulesets.length +
+            extensions.length +
+            webhookSubscriptions.length +
+            incidentWorkflows.length +
+            eventOrchestrations.length,
         }
 
         // Encrypt and store resources
@@ -349,28 +499,62 @@ export const configExport = inngest.createFunction(
           },
         })
 
-        // Create PdResource records
-        for (const [pdId, resource] of Object.entries(resources)) {
-          const configJsonString = JSON.stringify({
-            id: resource.pdId,
-            type: resource.type,
-            name: resource.name,
-            teamIds: resource.teamIds,
-            dependencies: resource.dependencies,
+        // Build richer configJson map for specific resource types
+        const richConfigMap = new Map<string, any>()
+        for (const ext of extensions) {
+          richConfigMap.set(ext.id, {
+            extension_schema: ext.extension_schema,
+            endpoint_url: ext.endpoint_url,
+            extension_objects: ext.extension_objects,
+            temporarily_disabled: ext.temporarily_disabled,
           })
-          const configJsonBytes = Buffer.from(configJsonString, 'utf8')
+        }
+        for (const wh of webhookSubscriptions) {
+          richConfigMap.set(wh.id, {
+            delivery_method: wh.delivery_method,
+            events: wh.events,
+            filter: wh.filter,
+            active: wh.active,
+          })
+        }
+        for (const wf of incidentWorkflows) {
+          richConfigMap.set(wf.id, {
+            steps: wf.steps,
+            team: wf.team,
+            description: wf.description,
+          })
+        }
+        for (const eo of eventOrchestrations) {
+          richConfigMap.set(eo.id, {
+            team: eo.team,
+            integrations: eo.integrations,
+            _routerRules: (eo as any)._routerRules,
+            _routedServiceIds: (eo as any)._routedServiceIds,
+          })
+        }
 
-          await prisma.pdResource.create({
-            data: {
+        // Create PdResource records in batches for performance
+        const CHUNK_SIZE = 500
+        const resourceEntries = Object.values(resources)
+        for (let i = 0; i < resourceEntries.length; i += CHUNK_SIZE) {
+          await prisma.pdResource.createMany({
+            data: resourceEntries.slice(i, i + CHUNK_SIZE).map((resource) => ({
               snapshotId: configSnapshot.id,
               pdType: resource.type as any,
               pdId: resource.pdId,
               name: resource.name,
               teamIds: resource.teamIds,
-              configJson: configJsonBytes,
+              configJson: Buffer.from(JSON.stringify({
+                id: resource.pdId,
+                type: resource.type,
+                name: resource.name,
+                teamIds: resource.teamIds,
+                dependencies: resource.dependencies,
+                ...(richConfigMap.get(resource.pdId) || {}),
+              }), 'utf8'),
               isStale: resource.isStale,
               dependencies: resource.dependencies,
-            },
+            })),
           })
         }
 

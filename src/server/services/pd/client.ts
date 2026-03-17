@@ -11,6 +11,9 @@ import type {
   PDAnalyticsIncident,
   PDRuleset,
   PDEventOrchestration,
+  PDExtension,
+  PDWebhookSubscription,
+  PDIncidentWorkflow,
   PDPaginatedResponse,
 } from "./types";
 
@@ -217,12 +220,50 @@ export class PagerDutyClient {
   }
 
   /**
+   * Get account-level extensions (ServiceNow, Slack, MS Teams, JIRA, etc.)
+   */
+  async listExtensions(): Promise<PDExtension[]> {
+    return this.paginateAll<PDExtension>("/extensions", "extensions");
+  }
+
+  /**
+   * Get webhook subscriptions (outbound webhooks v3)
+   */
+  async listWebhookSubscriptions(): Promise<PDWebhookSubscription[]> {
+    try {
+      return await this.paginateAll<PDWebhookSubscription>(
+        "/webhook_subscriptions",
+        "webhook_subscriptions"
+      );
+    } catch {
+      // Some accounts may not have access to this endpoint
+      return [];
+    }
+  }
+
+  /**
+   * Get incident workflows
+   */
+  async listIncidentWorkflows(): Promise<PDIncidentWorkflow[]> {
+    try {
+      return await this.paginateAll<PDIncidentWorkflow>(
+        "/incident_workflows",
+        "incident_workflows"
+      );
+    } catch {
+      // Incident workflows may not be available on all plan tiers
+      return [];
+    }
+  }
+
+  /**
    * Get log entries with optional filters
    */
   async getLogEntries(params: {
     since: string;
     until: string;
     isOverview?: boolean;
+    maxEntries?: number;
     onPage?: (fetched: number, hasMore: boolean) => void;
   }): Promise<PDLogEntry[]> {
     const requestParams: Record<string, any> = {
@@ -234,7 +275,7 @@ export class PagerDutyClient {
       requestParams.is_overview = params.isOverview;
     }
 
-    return this.paginateAll<PDLogEntry>("/log_entries", "log_entries", requestParams, params.onPage);
+    return this.paginateAll<PDLogEntry>("/log_entries", "log_entries", requestParams, params.onPage, params.maxEntries);
   }
 
   /**
@@ -407,12 +448,14 @@ export class PagerDutyClient {
   /**
    * Auto-paginate through all results using offset and limit.
    * Accepts an optional onPage callback for progress reporting.
+   * Optional maxEntries caps total results to prevent OOM on large accounts.
    */
   private async paginateAll<T>(
     path: string,
     resourceKey: string,
     params?: Record<string, any>,
-    onPage?: (fetched: number, hasMore: boolean) => void
+    onPage?: (fetched: number, hasMore: boolean) => void,
+    maxEntries?: number
   ): Promise<T[]> {
     const allResults: T[] = [];
     let offset = 0;
@@ -435,6 +478,11 @@ export class PagerDutyClient {
 
       hasMore = (response as any).more === true;
       offset += limit;
+
+      // Cap total entries to prevent OOM on large accounts
+      if (maxEntries && allResults.length >= maxEntries) {
+        hasMore = false;
+      }
 
       if (onPage) {
         onPage(allResults.length, hasMore);

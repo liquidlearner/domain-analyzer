@@ -7,6 +7,8 @@ import { analyzeNoise } from '@/server/services/analysis/noise'
 import { analyzeSources } from '@/server/services/analysis/sources'
 import { analyzeShadowStack } from '@/server/services/analysis/shadow-stack'
 import { analyzeRisk } from '@/server/services/analysis/risk'
+import { generateProjectPlan } from '@/server/services/analysis/project-plan'
+import { compressJson, decompressJson } from '@/lib/compression'
 
 /**
  * Run an evaluation directly (no Inngest required).
@@ -31,6 +33,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     })
 
     // Step 1: Load evaluation, domain, and latest config snapshot
+    // Load resources WITHOUT configJson first (lightweight), then selectively load configJson
     const evaluation = await prisma.evaluation.findUnique({
       where: { id: evaluationId },
       include: {
@@ -40,7 +43,20 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
               where: { status: 'COMPLETED' },
               orderBy: { capturedAt: 'desc' },
               take: 1,
-              include: { resources: true },
+              include: {
+                resources: {
+                  select: {
+                    id: true,
+                    pdType: true,
+                    pdId: true,
+                    name: true,
+                    teamIds: true,
+                    isStale: true,
+                    dependencies: true,
+                    // Omit configJson here — loaded selectively below
+                  },
+                },
+              },
             },
           },
         },
@@ -55,6 +71,19 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     if (!latestSnapshot) {
       throw new Error('No config snapshot found. Run a config sync first.')
     }
+
+    // Selectively load configJson only for resource types that need it during analysis
+    // Use raw SQL to avoid Turbopack enum resolution issues with Prisma's `in` filter
+    const CONFIG_TYPES = new Set(['EVENT_ORCHESTRATION', 'EXTENSION', 'WEBHOOK_SUBSCRIPTION', 'INCIDENT_WORKFLOW'])
+    const resourcesWithConfig = await prisma.pdResource.findMany({
+      where: { snapshotId: latestSnapshot.id },
+      select: { id: true, pdId: true, pdType: true, name: true, configJson: true },
+    })
+    const configJsonByPdId = new Map(
+      resourcesWithConfig
+        .filter((r) => CONFIG_TYPES.has(r.pdType))
+        .map((r) => [r.pdId, r.configJson])
+    )
 
     // Update status to INCIDENT_PULL
     await prisma.evaluation.update({
@@ -99,17 +128,25 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     // Build orchestration → service routing map from stored config
     const eoResources = resourcesByType.get('EVENT_ORCHESTRATION') || []
     // Map: serviceId → list of orchestrations that route to it
-    const serviceToOrchestrations = new Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number }>>()
+    const serviceToOrchestrations = new Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number; eoIntegrationNames: string[] }>>()
     for (const eo of eoResources) {
       try {
-        const config = JSON.parse(Buffer.from(eo.configJson).toString('utf-8'))
+        const rawConfig = configJsonByPdId.get(eo.pdId)
+        if (!rawConfig) continue
+        const config = decompressJson(rawConfig)
         const routedServiceIds: string[] = config._routedServiceIds || []
         const routerRules = config._routerRules
         const ruleCount = routerRules?.sets?.reduce((n: number, s: any) => n + (s.rules?.length || 0), 0) || 0
 
+        // Extract EO integration names for upstream source identification
+        const eoIntegrations: any[] = config.integrations || []
+        const eoIntegrationNames: string[] = eoIntegrations
+          .map((i: any) => i.label || i.summary || i.type || '')
+          .filter((n: string) => n && n !== 'Unknown')
+
         for (const svcId of routedServiceIds) {
           const existing = serviceToOrchestrations.get(svcId) || []
-          existing.push({ eoName: eo.name, eoPdId: eo.pdId, ruleCount })
+          existing.push({ eoName: eo.name, eoPdId: eo.pdId, ruleCount, eoIntegrationNames })
           serviceToOrchestrations.set(svcId, existing)
         }
       } catch {
@@ -203,6 +240,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
         since: logSince,
         until,
         isOverview: false,
+        maxEntries: 50000, // Cap to prevent OOM on large accounts
         onPage: (fetched, hasMore) => {
           const progress = hasMore ? Math.min(50 + Math.floor(fetched / 100), 59) : 60
           jobProgress.updateProgress(jobId, {
@@ -242,28 +280,49 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     const noiseAnalysis = analyzeNoise(incidents, logEntries)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 78, message: 'Identifying alert sources...' })
-    const sourceAnalysis = analyzeSources(incidents, services, integrationsMap)
+    const sourceAnalysis = analyzeSources(incidents, services, integrationsMap, serviceToOrchestrations)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 84, message: 'Detecting shadow stack integrations...' })
-    const shadowStackAnalysis = analyzeShadowStack(incidents, logEntries, services, integrationsMap)
+    // Gather account-level resources (extensions, webhooks, workflows) for shadow stack detection
+    const accountLevelResources = allResources
+      .filter((r) => ['EXTENSION', 'WEBHOOK_SUBSCRIPTION', 'INCIDENT_WORKFLOW'].includes(r.pdType))
+      .map((r) => {
+        let configJson: any = {}
+        const rawConfig = configJsonByPdId.get(r.pdId)
+        if (rawConfig) {
+          try { configJson = decompressJson(rawConfig) } catch { /* empty */ }
+        }
+        return { pdId: r.pdId, pdType: r.pdType, name: r.name, configJson }
+      })
+    const shadowStackAnalysis = analyzeShadowStack(incidents, logEntries, services, integrationsMap, serviceToOrchestrations, accountLevelResources)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 88, message: 'Calculating risk assessment...' })
-    // Only pass scoped resources into risk analysis
-    const scopedResources = allResources.filter((r) => {
-      if (r.pdType === 'SERVICE') return scopedServicePdIds.has(r.pdId)
-      if (r.pdType === 'TEAM') return scopedTeamPdIds.has(r.pdId)
-      // Include EPs, schedules, etc. that are dependencies of scoped services
-      if (r.pdType === 'ESCALATION_POLICY' || r.pdType === 'SCHEDULE') {
-        return allResources.some(
-          (svc) => svc.pdType === 'SERVICE' && scopedServicePdIds.has(svc.pdId) && svc.dependencies.includes(r.pdId)
-        )
-      }
-      // Include EOs that route to scoped services
-      if (r.pdType === 'EVENT_ORCHESTRATION') {
-        return r.dependencies?.some((depId) => scopedServicePdIds.has(depId))
-      }
-      return false
-    })
+    // Only pass scoped resources into risk analysis — enrich with parsed configJson
+    const scopedResources = allResources
+      .filter((r) => {
+        if (r.pdType === 'SERVICE') return scopedServicePdIds.has(r.pdId)
+        if (r.pdType === 'TEAM') return scopedTeamPdIds.has(r.pdId)
+        // Include EPs, schedules, etc. that are dependencies of scoped services
+        if (r.pdType === 'ESCALATION_POLICY' || r.pdType === 'SCHEDULE') {
+          return allResources.some(
+            (svc) => svc.pdType === 'SERVICE' && scopedServicePdIds.has(svc.pdId) && svc.dependencies.includes(r.pdId)
+          )
+        }
+        // Include EOs that route to scoped services
+        if (r.pdType === 'EVENT_ORCHESTRATION') {
+          return r.dependencies?.some((depId) => scopedServicePdIds.has(depId))
+        }
+        return false
+      })
+      .map((r) => {
+        // Attach parsed configJson from the separate configJson query
+        const rawConfig = configJsonByPdId.get(r.pdId)
+        let configJson: any = undefined
+        if (rawConfig) {
+          try { configJson = decompressJson(rawConfig) } catch { /* empty */ }
+        }
+        return { ...r, configJson }
+      })
 
     const riskAnalysis = analyzeRisk(volumeAnalysis, noiseAnalysis, shadowStackAnalysis, scopedResources, timeRangeDays)
 
@@ -292,13 +351,13 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
         noiseRatio: noiseAnalysis.overallNoiseRatio,
         mttrP50: noiseAnalysis.meanTimeToResolve > 0 ? noiseAnalysis.meanTimeToResolve : null,
         mttrP95: null,
-        sourcesJson: Buffer.from(JSON.stringify({
+        sourcesJson: compressJson({
           sources: sourceAnalysis,
           volume: volumeAnalysis,
           risk: riskAnalysis,
           shadowStack: shadowStackAnalysis,
-        })),
-        patternsJson: Buffer.from(JSON.stringify(noisePatterns)),
+        }),
+        patternsJson: compressJson(noisePatterns),
         shadowSignals,
       },
     })
@@ -331,7 +390,8 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     console.log(`[EvaluationRunner] Creating ${scopedMappingResources.length} scoped migration mappings (vs ${allResources.length} total)`)
 
     const mappingData = scopedMappingResources.map((resource) => {
-      const mapping = getResourceMapping(resource, serviceToOrchestrations, integrationsMap)
+      const configJson = configJsonByPdId.get(resource.pdId) || Buffer.from('{}')
+      const mapping = getResourceMapping({ ...resource, configJson }, serviceToOrchestrations, integrationsMap)
       return {
         evaluationId,
         pdResourceId: resource.id,
@@ -343,13 +403,55 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
       }
     })
 
-    await prisma.$transaction(async (tx) => {
-      for (const data of mappingData) {
-        await tx.migrationMapping.create({ data })
-      }
-    }, { timeout: 60000 })
+    const CHUNK_SIZE = 500
+    for (let i = 0; i < mappingData.length; i += CHUNK_SIZE) {
+      await prisma.migrationMapping.createMany({
+        data: mappingData.slice(i, i + CHUNK_SIZE),
+      })
+    }
 
-    // ── Step 10: Mark evaluation as COMPLETED ──
+    // ── Step 10: Generate team-based project plan ──
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 98, message: 'Building migration project plan...' })
+
+    const projectPlan = generateProjectPlan(
+      scopedMappingResources.map(r => ({
+        id: r.id,
+        pdType: r.pdType,
+        pdId: r.pdId,
+        name: r.name,
+        teamIds: r.teamIds,
+        dependencies: r.dependencies || [],
+      })),
+      mappingData.map(m => ({
+        pdResourceId: m.pdResourceId,
+        conversionStatus: m.conversionStatus,
+        effortEstimate: m.effortEstimate,
+      })),
+      volumeAnalysis,
+      shadowStackAnalysis,
+      riskAnalysis,
+      timeRangeDays
+    )
+
+    // Update sourcesJson to include project plan and scoped counts
+    await prisma.incidentAnalysis.updateMany({
+      where: { evaluationId },
+      data: {
+        sourcesJson: compressJson({
+          sources: sourceAnalysis,
+          volume: volumeAnalysis,
+          risk: riskAnalysis,
+          shadowStack: shadowStackAnalysis,
+          projectPlan,
+          scopedCounts: {
+            services: scopedServicePdIds.size,
+            teams: scopedTeamPdIds.size,
+          },
+        }),
+      },
+    })
+
+    // ── Step 11: Mark evaluation as COMPLETED ──
     await prisma.evaluation.update({
       where: { id: evaluationId },
       data: { status: 'COMPLETED', completedAt: new Date() },

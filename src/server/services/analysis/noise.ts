@@ -6,6 +6,7 @@ export interface NoiseAnalysis {
   meanTimeToResolve: number // seconds
   transientAlerts: { serviceId: string; serviceName: string; count: number; avgDurationMinutes: number }[]
   overallNoiseRatio: number // 0-1, percentage that's noise
+  logEntriesAvailable: boolean // whether log entry data was available for accurate noise detection
 }
 
 export function analyzeNoise(
@@ -18,6 +19,8 @@ export function analyzeNoise(
   let ackTimes: number[] = []
   let resolveTimes: number[] = []
   let transientAlertsMap = new Map<string, { count: number; durations: number[] }>()
+
+  const hasLogEntries = logEntries.length > 0
 
   // Build log entry map for quick lookup
   const logsByIncident = new Map<string, any[]>()
@@ -60,9 +63,14 @@ export function analyzeNoise(
     }
 
     // Categorize noise
-    if (isResolved && !ackLog) {
-      // Resolved without acknowledgment = auto-resolved
+    if (isResolved && !ackLog && hasLogEntries) {
+      // Resolved without acknowledgment (confirmed via log entries) = auto-resolved
       autoResolvedCount++
+    } else if (isResolved && !hasLogEntries) {
+      // Without log entries, use time-based heuristic: resolve < 60s = likely automated
+      if (resolvedAt > createdAt && (resolvedAt - createdAt) < 60000) {
+        autoResolvedCount++
+      }
     } else if (isAcknowledged && logs.length === 1) {
       // Acknowledged with no further action
       ackNoActionCount++
@@ -142,5 +150,6 @@ export function analyzeNoise(
     meanTimeToResolve,
     transientAlerts,
     overallNoiseRatio,
+    logEntriesAvailable: hasLogEntries,
   }
 }
