@@ -272,6 +272,190 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
       integrationsMap.set(svc.id, svc.integrations || [])
     })
 
+    // ── Step 6b: Alert payload sampling for source identification (Layer 4) ──
+    // Six-layer source detection: when service integrations have null/generic vendor
+    // metadata, sample alert payloads and parse titles to identify actual monitoring sources.
+    jobProgress.updateProgress(jobId, { status: 'running', progress: 62, message: 'Sampling alert payloads for source identification...' })
+
+    const alertSourceMap = new Map<string, string>() // integrationId → source_origin
+    const serviceSourceMap = new Map<string, string>() // serviceId → best source name
+    // Track ALL sources found per service (a service can receive from multiple sources)
+    const serviceSourcesMulti = new Map<string, Set<string>>() // serviceId → set of source names
+
+    // source_origin domain → friendly display name mapping
+    const SOURCE_ORIGIN_DISPLAY: Record<string, string> = {
+      'datadoghq.com': 'Datadog',
+      'splunkcloud.com': 'Splunk Cloud',
+      'splunk.com': 'Splunk',
+      'newrelic.com': 'New Relic',
+      'amazonaws.com': 'AWS CloudWatch',
+      'grafana.com': 'Grafana',
+      'grafana.net': 'Grafana',
+      'dynatrace.com': 'Dynatrace',
+      'sumologic.com': 'Sumo Logic',
+      'pingdom.com': 'Pingdom',
+      'elastic.co': 'Elastic',
+      'opsgenie.com': 'OpsGenie',
+      'sentry.io': 'Sentry',
+      'statuspage.io': 'Statuspage',
+      'pagerduty.com': 'PagerDuty',
+    }
+
+    function resolveSourceDisplayName(sourceOrigin: string): string {
+      if (!sourceOrigin) return sourceOrigin
+      const lower = sourceOrigin.toLowerCase()
+      // Direct match
+      if (SOURCE_ORIGIN_DISPLAY[lower]) return SOURCE_ORIGIN_DISPLAY[lower]
+      // Partial domain match (e.g., cw.us-east-1.amazonaws.com → AWS CloudWatch)
+      for (const [domain, name] of Object.entries(SOURCE_ORIGIN_DISPLAY)) {
+        if (lower.includes(domain)) {
+          // For CloudWatch, include the region if present
+          if (domain === 'amazonaws.com') {
+            const regionMatch = lower.match(/(?:cw\.|cloudwatch\.)?([\w-]+)\.amazonaws/)
+            if (regionMatch) return `${name} (${regionMatch[1]})`
+          }
+          return name
+        }
+      }
+      return sourceOrigin
+    }
+
+    // Identify services with null-vendor integrations that need alert sampling
+    const GENERIC_VENDORS = new Set(['change events', 'events api v2', 'events api v1', 'events api', 'email', 'pagerduty', 'unknown'])
+    const nullVendorServiceIds: string[] = []
+    for (const [serviceId, ints] of integrationsMap) {
+      const hasRealVendor = ints.some((i: any) => {
+        const vendorName = (i.vendor?.name || '').toLowerCase()
+        return vendorName && !GENERIC_VENDORS.has(vendorName)
+      })
+      if (!hasRealVendor) {
+        nullVendorServiceIds.push(serviceId)
+      }
+    }
+
+    // Phase 1: Bulk title scan — parse source from incident titles
+    // Multiple patterns: [Source] prefix, Source: prefix, Source - prefix
+    const TITLE_PATTERNS = [
+      /^\[([^\]]+)\]/,           // [Datadog] High CPU...
+      /^([\w\s]+?):\s/,          // Datadog: High CPU...
+      /^([\w\s]+?)\s[-–]\s/,     // Datadog - High CPU...
+    ]
+    // Known monitoring tool names to validate title-extracted sources
+    const KNOWN_SOURCES = new Set([
+      'datadog', 'splunk', 'newrelic', 'new relic', 'cloudwatch', 'aws cloudwatch',
+      'grafana', 'prometheus', 'nagios', 'zabbix', 'dynatrace', 'sumo logic',
+      'elastic', 'kibana', 'pingdom', 'sentry', 'opsgenie', 'appdynamics',
+      'thousandeyes', 'catchpoint', 'site24x7', 'logic monitor', 'logicmonitor',
+    ])
+
+    const titleSources = new Map<string, Set<string>>() // serviceId → set of sources from titles
+    for (const incident of incidents) {
+      const serviceId = incident.service?.id
+      if (!serviceId) continue
+      const title = incident.title || ''
+      for (const pattern of TITLE_PATTERNS) {
+        const match = title.match(pattern)
+        if (match) {
+          const extracted = match[1].trim()
+          // Validate: only accept if it looks like a known source or is short enough to be a source name
+          if (extracted.length <= 30 && (KNOWN_SOURCES.has(extracted.toLowerCase()) || extracted.length <= 15)) {
+            const sources = titleSources.get(serviceId) || new Set()
+            sources.add(extracted)
+            titleSources.set(serviceId, sources)
+          }
+          break // First matching pattern wins
+        }
+      }
+    }
+
+    console.log(`[EvaluationRunner] Title scan: found sources for ${titleSources.size} services from incident titles`)
+
+    // Phase 2: Per-service targeted sampling — fetch actual alert payloads
+    // Sample ALL null-vendor services, not just those without title matches
+    // (title matches are hints, alert source_origin is ground truth)
+    const servicesToSample = nullVendorServiceIds
+    const seenIntegrationIds = new Set<string>()
+    let noNewSourceCount = 0
+    const MAX_NO_NEW_SOURCE = 20 // Early termination threshold
+    let alertsSampled = 0
+
+    if (servicesToSample.length > 0 && servicesToSample.length <= 500) {
+      jobProgress.updateProgress(jobId, {
+        status: 'running',
+        progress: 62,
+        message: `Sampling alerts for ${servicesToSample.length} services to identify monitoring sources...`,
+      })
+
+      for (const serviceId of servicesToSample) {
+        if (noNewSourceCount >= MAX_NO_NEW_SOURCE) break
+
+        // Get a few recent incidents for this service from our already-pulled data
+        const serviceIncidents = incidents
+          .filter((i: any) => i.service?.id === serviceId)
+          .slice(0, 3)
+
+        let foundNew = false
+        for (const incident of serviceIncidents) {
+          try {
+            const alerts = await pdClient.listIncidentAlerts(incident.id, { limit: 1 })
+            for (const alert of alerts) {
+              alertsSampled++
+              const integrationId = alert.integration?.id
+
+              // Only skip if we have a real (non-empty) integration ID we've already seen
+              if (integrationId && integrationId.length > 0 && seenIntegrationIds.has(integrationId)) continue
+              if (integrationId && integrationId.length > 0) seenIntegrationIds.add(integrationId)
+
+              const sourceOrigin = alert.body?.cef_details?.source_origin
+              const sourceComponent = alert.body?.cef_details?.source_component
+              const rawSource = sourceOrigin || sourceComponent
+
+              if (rawSource) {
+                const displayName = resolveSourceDisplayName(rawSource)
+                // Track per-service (primary = first found)
+                if (!serviceSourceMap.has(serviceId)) {
+                  serviceSourceMap.set(serviceId, displayName)
+                }
+                // Track all sources per service
+                const multi = serviceSourcesMulti.get(serviceId) || new Set()
+                multi.add(displayName)
+                serviceSourcesMulti.set(serviceId, multi)
+                // Cache by integration ID if available
+                if (integrationId && integrationId.length > 0) {
+                  alertSourceMap.set(integrationId, displayName)
+                }
+                foundNew = true
+                break // Got a source for this service from this incident
+              }
+            }
+          } catch {
+            // Alert fetch failed, continue
+          }
+          if (serviceSourceMap.has(serviceId)) break
+        }
+
+        if (foundNew) {
+          noNewSourceCount = 0
+        } else {
+          noNewSourceCount++
+        }
+      }
+    }
+
+    // Merge title sources into serviceSourceMap (title sources are lower priority than alert sampling)
+    for (const [serviceId, sources] of titleSources) {
+      const firstSource = [...sources][0]
+      if (!serviceSourceMap.has(serviceId) && firstSource) {
+        serviceSourceMap.set(serviceId, firstSource)
+      }
+      // Also add to multi-source map
+      const multi = serviceSourcesMulti.get(serviceId) || new Set()
+      for (const s of sources) multi.add(s)
+      serviceSourcesMulti.set(serviceId, multi)
+    }
+
+    console.log(`[EvaluationRunner] Alert sampling complete: ${serviceSourceMap.size} service sources identified, ${alertsSampled} alerts sampled, ${alertSourceMap.size} integration IDs cached`)
+
     // ── Step 7: Run analysis engines ──
     jobProgress.updateProgress(jobId, { status: 'running', progress: 65, message: 'Analyzing incident volume...' })
     const volumeAnalysis = analyzeVolume(incidents, services)
@@ -280,7 +464,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     const noiseAnalysis = analyzeNoise(incidents, logEntries)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 78, message: 'Identifying alert sources...' })
-    const sourceAnalysis = analyzeSources(incidents, services, integrationsMap, serviceToOrchestrations)
+    const sourceAnalysis = analyzeSources(incidents, services, integrationsMap, serviceToOrchestrations, serviceSourceMap, alertSourceMap)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 84, message: 'Detecting shadow stack integrations...' })
     // Gather account-level resources (extensions, webhooks, workflows) for shadow stack detection

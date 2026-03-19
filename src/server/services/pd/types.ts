@@ -344,6 +344,21 @@ export interface PDIncidentWorkflow {
     action_configuration?: {
       action_id?: string;
       description?: string;
+      inline_steps_input?: any;
+    };
+    inputs?: Array<{
+      name: string;
+      value?: string;
+      generated?: boolean;
+    }>;
+  }>;
+  triggers?: Array<{
+    type?: string;
+    trigger_type?: string;
+    condition?: string;
+    permissions?: {
+      restricted?: boolean;
+      team_id?: string;
     };
   }>;
   team?: {
@@ -351,6 +366,48 @@ export interface PDIncidentWorkflow {
     type: string;
     summary?: string;
   };
+}
+
+export interface PDAlert {
+  id: string;
+  type?: string;
+  summary?: string;
+  self?: string;
+  html_url?: string;
+  created_at?: string;
+  status?: string;
+  alert_key?: string;
+  integration?: {
+    id: string;
+    type?: string;
+    summary?: string;
+    self?: string;
+    html_url?: string;
+  };
+  service?: PDService;
+  body?: {
+    type?: string;
+    cef_details?: {
+      source_origin?: string;
+      source_component?: string;
+      event_class?: string;
+      severity?: string;
+      dedup_key?: string;
+      details?: Record<string, any>;
+    };
+    details?: Record<string, any>;
+  };
+}
+
+export interface PDSlackConnection {
+  id: string;
+  source_id?: string;
+  source_name?: string;
+  source_type?: string;
+  channel_id?: string;
+  channel_name?: string;
+  notification_type?: string;
+  config?: Record<string, any>;
 }
 
 export interface PDPaginatedResponse<T> {

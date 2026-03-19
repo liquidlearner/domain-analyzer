@@ -28,7 +28,9 @@ export function analyzeSources(
   incidents: any[],
   services: any[],
   integrations: Map<string, any[]>,
-  serviceToOrchestrations?: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number; eoIntegrationNames?: string[] }>>
+  serviceToOrchestrations?: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number; eoIntegrationNames?: string[] }>>,
+  serviceSourceMap?: Map<string, string>,
+  alertSourceMap?: Map<string, string>,
 ): SourceAnalysis {
   const sourceMap = new Map<string, number>()
   let totalFromMonitoring = 0
@@ -104,6 +106,9 @@ export function analyzeSources(
     const channelType = incident.first_trigger_log_entry?.channel?.type
     const channelSource = getSourceFromChannel(incident)
 
+    // Helper: check alert sampling data for this service
+    const alertSampledSource = serviceSourceMap?.get(serviceId) || null
+
     // Priority 1: Real source from incident payload channel data (most reliable)
     // The .source / .cef_details.source_component field contains the actual monitoring tool name
     if (channelSource) {
@@ -120,7 +125,22 @@ export function analyzeSources(
         totalFromMonitoring-- // undo the monitoring count
       }
     }
-    // Priority 2: EO-routed service but no channel source available
+    // Priority 2: Alert payload sampling — source_origin/source_component from alert body
+    // This catches sources when channel data is not expanded but we sampled alerts
+    else if (alertSampledSource) {
+      sourceName = alertSampledSource
+      sourceType = 'monitoring'
+      totalFromMonitoring++
+      if (eoRoutedServices.has(serviceId)) {
+        const eoInfo = serviceToEoInfo.get(serviceId)
+        const eoName = eoInfo?.eoName || 'Event Orchestration'
+        sourceName = `${alertSampledSource} (via ${eoName})`
+        sourceType = 'event_orchestration'
+        totalFromOrchestration++
+        totalFromMonitoring--
+      }
+    }
+    // Priority 3: EO-routed service but no channel/alert source available
     else if (eoRoutedServices.has(serviceId)) {
       const eoInfo = serviceToEoInfo.get(serviceId)
       const eoName = eoInfo?.eoName || 'Global Event Orchestration'
@@ -132,13 +152,13 @@ export function analyzeSources(
       sourceType = 'event_orchestration'
       totalFromOrchestration++
     }
-    // Priority 3: API-created incidents (explicit API channel)
+    // Priority 4: API-created incidents (explicit API channel)
     else if (channelType === 'api') {
       sourceType = 'api'
       sourceName = 'Direct API'
       totalFromApi++
     }
-    // Priority 4: Email-created incidents
+    // Priority 5: Email-created incidents
     else if (
       channelType === 'email' ||
       incident.channels?.some((ch: any) => ch.type === 'email_log_entry')
@@ -147,7 +167,7 @@ export function analyzeSources(
       sourceName = 'Email Integration'
       totalFromEmail++
     }
-    // Priority 5: Events API v2 / Events API channel type — check for vendor on service
+    // Priority 6: Events API v2 / Events API channel type — check for vendor on service
     else if (channelType === 'events_api_v2' || channelType === 'events_api') {
       const realVendor = getRealVendorIntegration(serviceId)
       if (realVendor) {
@@ -160,7 +180,7 @@ export function analyzeSources(
         totalFromApi++
       }
     }
-    // Priority 6: Real vendor integrations on the service (not generic ones)
+    // Priority 7: Real vendor integrations on the service (not generic ones)
     else {
       const realVendor = getRealVendorIntegration(serviceId)
       if (realVendor) {

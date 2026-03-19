@@ -186,15 +186,41 @@ export const configExport = inngest.createFunction(
         return result
       })
 
-      // Step 11: Pull incident workflows
+      // Step 11: Pull incident workflows — list first, then fetch detail for each
       const incidentWorkflows = await step.run('pull-incident-workflows', async () => {
-        const result = await pdClient.listIncidentWorkflows()
+        const list = await pdClient.listIncidentWorkflows()
+        jobProgress.updateProgress(domainId, {
+          status: 'running',
+          progress: 76,
+          message: `Fetched ${list.length} incident workflows, pulling step details...`,
+        })
+
+        // Fetch full detail (steps + triggers) for each workflow
+        // The list endpoint does NOT return steps/triggers
+        const detailResults = await Promise.allSettled(
+          list.map((wf) => pdClient.getIncidentWorkflowDetail(wf.id))
+        )
+
+        const enrichedWorkflows = list.map((wf, i) => {
+          const detail = detailResults[i]
+          if (detail.status === 'fulfilled' && detail.value) {
+            return { ...wf, steps: detail.value.steps, triggers: detail.value.triggers }
+          }
+          return wf
+        })
+
         jobProgress.updateProgress(domainId, {
           status: 'running',
           progress: 79,
-          message: `Fetched ${result.length} incident workflows`,
+          message: `Fetched ${list.length} incident workflows with step details`,
         })
-        return result
+
+        return enrichedWorkflows
+      })
+
+      // Step 11b: Check for Slack connections (account-level)
+      const slackConnections = await step.run('pull-slack-connections', async () => {
+        return await pdClient.getSlackConnections()
       })
 
       // Step 12: Pull Event Orchestrations with router rules (reveals dynamic routing)
@@ -407,7 +433,7 @@ export const configExport = inngest.createFunction(
           }
         }
 
-        // Add incident workflows
+        // Add incident workflows with full step/trigger detail for integration detection
         for (const wf of incidentWorkflows) {
           resources[wf.id] = {
             pdId: wf.id,
@@ -417,6 +443,7 @@ export const configExport = inngest.createFunction(
             dependencies: [],
             isStale: false,
           }
+          // Note: full configJson with steps/triggers stored in richConfigMap below
         }
 
         // Add event orchestrations with router rules (dynamic routing detection)
@@ -519,9 +546,11 @@ export const configExport = inngest.createFunction(
         }
         for (const wf of incidentWorkflows) {
           richConfigMap.set(wf.id, {
-            steps: wf.steps,
+            steps: wf.steps || [],
+            triggers: (wf as any).triggers || [],
             team: wf.team,
             description: wf.description,
+            _slackConnections: slackConnections.length > 0 ? slackConnections : undefined,
           })
         }
         for (const eo of eventOrchestrations) {

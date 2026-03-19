@@ -16,6 +16,7 @@ export interface ShadowSignal {
     | 'eo_routing_layer'
     | 'terraform_consumer'
     | 'analytics_pipeline'
+    | 'workflow_integration'
   confidence: 'high' | 'medium' | 'low'
   evidence: string
   description: string
@@ -87,6 +88,11 @@ const REPLACEMENT_MAP: Record<ShadowSignal['type'], IncidentIoReplacement> = {
     feature: 'incident.io Webhooks + API',
     action: 'Reconfigure data export pipeline to consume incident.io webhook events or API.',
     effort: 'Medium — 2-3 days',
+  },
+  workflow_integration: {
+    feature: 'incident.io Workflows',
+    action: 'Recreate PagerDuty Incident Workflow actions as incident.io Workflow steps. Native integrations (Slack, MS Teams, Jira) are built-in.',
+    effort: 'Low-Medium — native integrations map directly',
   },
 }
 
@@ -398,15 +404,78 @@ export function analyzeShadowStack(
       }
 
       if (resource.pdType === 'INCIDENT_WORKFLOW') {
-        const stepCount = resource.configJson?.steps?.length || 0
-        rawSignals.push({
-          type: 'custom_extension',
-          confidence: 'high',
-          evidence: `Incident workflow with ${stepCount} step${stepCount !== 1 ? 's' : ''}`,
-          description: `Incident Workflow: ${resource.name}`,
-          serviceId: resource.pdId,
-          serviceName: resource.name,
-        })
+        const steps = resource.configJson?.steps || []
+        const triggers = resource.configJson?.triggers || []
+
+        // Parse action_id to detect external vendor integrations
+        // Format: pagerduty.com:{vendor}:{action}:{version}
+        // PD native vendors that are internal workflow mechanics, not external integrations
+        // Note: status-pages IS flagged as it represents an external dependency (customer-facing status page)
+        const PD_NATIVE_VENDORS = new Set(['incident-workflows', 'logic', 'roles', 'tasks'])
+        const externalVendors = new Map<string, string[]>() // vendor → list of action descriptions
+
+        for (const step of steps) {
+          const actionId = step.action_configuration?.action_id || ''
+          const parts = actionId.split(':')
+          if (parts.length >= 3 && parts[0] === 'pagerduty.com') {
+            const vendor = parts[1]
+            if (!PD_NATIVE_VENDORS.has(vendor)) {
+              const actions = externalVendors.get(vendor) || []
+              actions.push(step.name || parts[2] || 'unknown action')
+              externalVendors.set(vendor, actions)
+            }
+          }
+        }
+
+        // Determine trigger type for context
+        const triggerTypes = triggers.map((t: any) => t.trigger_type || t.type || 'unknown')
+        const isAutomatic = triggerTypes.some((t: string) => t === 'conditional')
+        const triggerLabel = isAutomatic ? 'auto-triggered' : 'manual'
+
+        // Vendor display name mapping (vendor segment from action_id pagerduty.com:{vendor}:...)
+        const VENDOR_DISPLAY: Record<string, string> = {
+          'servicenow': 'ServiceNow',
+          'slack': 'Slack',
+          'microsoft-teams': 'Microsoft Teams',
+          'zoom': 'Zoom',
+          'jira': 'Jira',
+          'salesforce': 'Salesforce',
+          'zendesk': 'Zendesk',
+          'aws': 'AWS Lambda',
+          'aws-lambda': 'AWS Lambda',
+          'grafana': 'Grafana',
+          'github': 'GitHub',
+          'datadog': 'Datadog',
+          'statuspage': 'Statuspage',
+          'status-pages': 'PagerDuty Status Page',
+        }
+
+        if (externalVendors.size > 0) {
+          // Create a signal per external vendor found in this workflow
+          for (const [vendor, actions] of externalVendors) {
+            const displayName = VENDOR_DISPLAY[vendor] || vendor
+            const uniqueActions = [...new Set(actions)]
+            rawSignals.push({
+              type: 'workflow_integration',
+              confidence: 'high',
+              evidence: `Workflow "${resource.name}" (${triggerLabel}) → ${displayName}: ${uniqueActions.join(', ')}`,
+              description: `${displayName} integration via Incident Workflow`,
+              serviceId: resource.pdId,
+              serviceName: resource.name,
+            })
+          }
+        } else {
+          // Workflow with no external vendors — still noteworthy
+          const stepCount = steps.length
+          rawSignals.push({
+            type: 'custom_extension',
+            confidence: 'medium',
+            evidence: `Incident workflow "${resource.name}" (${triggerLabel}) with ${stepCount} step${stepCount !== 1 ? 's' : ''} (PD-native actions only)`,
+            description: `Incident Workflow: ${resource.name}`,
+            serviceId: resource.pdId,
+            serviceName: resource.name,
+          })
+        }
       }
     }
   }

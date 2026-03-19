@@ -14,6 +14,8 @@ import type {
   PDExtension,
   PDWebhookSubscription,
   PDIncidentWorkflow,
+  PDAlert,
+  PDSlackConnection,
   PDPaginatedResponse,
 } from "./types";
 
@@ -34,7 +36,7 @@ export class PagerDutyClient {
     requestsThisMinute: 0,
     lastResetTime: Date.now(),
   };
-  private readonly requestsPerMinuteLimit = 900;
+  private readonly requestsPerMinuteLimit = 500;
   private readonly retryDelay = 1000; // start at 1s
 
   constructor(opts: { token: string; subdomain: string }) {
@@ -244,7 +246,7 @@ export class PagerDutyClient {
   }
 
   /**
-   * Get incident workflows
+   * Get incident workflows (list only — no steps/triggers)
    */
   async listIncidentWorkflows(): Promise<PDIncidentWorkflow[]> {
     try {
@@ -254,6 +256,58 @@ export class PagerDutyClient {
       );
     } catch {
       // Incident workflows may not be available on all plan tiers
+      return [];
+    }
+  }
+
+  /**
+   * Get full detail for a single incident workflow (includes steps with action_ids and triggers)
+   * The list endpoint does NOT return steps/triggers — must fetch individually.
+   */
+  async getIncidentWorkflowDetail(workflowId: string): Promise<PDIncidentWorkflow | null> {
+    try {
+      const response = await this.request<{ incident_workflow: PDIncidentWorkflow }>(
+        "GET",
+        `/incident_workflows/${workflowId}`
+      );
+      return response.incident_workflow || null;
+    } catch {
+      return null;
+    }
+  }
+
+  /**
+   * Get alerts for a specific incident (for source identification via alert payload)
+   */
+  async listIncidentAlerts(incidentId: string, params?: { limit?: number }): Promise<PDAlert[]> {
+    try {
+      const requestParams: Record<string, any> = {
+        limit: params?.limit || 5,
+      };
+      const response = await this.request<{ alerts: PDAlert[] }>(
+        "GET",
+        `/incidents/${incidentId}/alerts`,
+        requestParams
+      );
+      return response.alerts || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get account-level Slack connections.
+   * Returns 404 if Slack is integrated only via Incident Workflows.
+   */
+  async getSlackConnections(): Promise<PDSlackConnection[]> {
+    try {
+      const response = await this.request<{ slack_connections: PDSlackConnection[] }>(
+        "GET",
+        "/slack_connections"
+      );
+      return response.slack_connections || [];
+    } catch {
+      // 404 is expected if Slack integration uses workflows only
       return [];
     }
   }
@@ -424,7 +478,7 @@ export class PagerDutyClient {
   }
 
   /**
-   * Check and enforce rate limiting (900 requests per minute)
+   * Check and enforce rate limiting (500 requests per minute — conservative limit below PD's 900/min cap)
    */
   private async checkRateLimit(): Promise<void> {
     const now = Date.now();
