@@ -542,38 +542,42 @@ Once Agents 1–4 are complete (foundation), significant parallelism is possible
 
 ---
 
-## Development Status (as of 2026-03-17)
+## Development Status (as of 2026-03-20)
 
 ### Completed
 
 | Agent | Status | Notes |
 |-------|--------|-------|
-| 1 (Bootstrap) | Done | Next.js 15, Prisma, tRPC, Tailwind, shadcn/ui, Inngest |
-| 2 (Database) | Done | Full schema, migrations, encryption utils |
-| 3 (Auth) | Done | Dev bypass mode (Google OAuth deferred) |
-| 4 (tRPC + CRUD) | Done | Customer, Domain, Evaluation routers |
-| 5 (PD Client) | Done | Full PD REST API client with rate limiting, pagination, retry |
-| 6 (Config Export) | Done | Direct PD API config sync (no Terraformer — uses PD REST API directly). Fetches services, teams, schedules, EPs, users, business services, extensions, webhooks, workflows, event orchestrations with router rules |
-| 7 (Incident Pull) | Done | Scoped by Team or Service, chunked 179-day windows, include[]=first_trigger_log_entry for source detection, maxEntries cap for log entries |
+| 1 (Bootstrap) | Done | Next.js 16, Prisma 6, tRPC 11, Tailwind 4, shadcn/ui, Inngest |
+| 2 (Database) | Done | Full schema with 11 resource types, migrations, AES-256-GCM encryption utils |
+| 3 (Auth) | Done | Dev bypass mode (Google OAuth deferred to production deployment) |
+| 4 (tRPC + CRUD) | Done | Customer, Domain, Evaluation, Admin routers with role-based middleware |
+| 5 (PD Client) | Done | Full PD REST API client with rate limiting (500 req/min), offset + cursor pagination, exponential backoff retry |
+| 6 (Config Export) | Done | Direct PD API config sync (no Terraformer). Fetches: services, teams, schedules, EPs, users, business services, extensions, webhooks, workflows, event orchestrations with router rules, automation actions + runners with invocation history |
+| 7 (Incident Pull) | Done | Scoped by Team or Service, chunked 179-day windows, `include[]=first_trigger_log_entry` for source detection, `maxEntries` cap for log entries |
 | 8 (Analysis Engine) | Done | All 6 modules: volume, noise, sources, shadow-stack (tool stack), risk, project-plan |
 | 9 (Layout + Dashboard) | Done | App shell, dashboard, incident.io orange brand |
 | 10 (Customer + Domain UI) | Done | Customer list, domain detail, config sync flow |
-| 11 (Evaluation UI) | Done | Scope selector, 6-tab results view (Overview, Config Map, Volume & Noise, Alert Sources, Tool Stack, Migration Plan) |
-| 12 (Report) | Done | Printable report page, print-button component |
+| 11 (Evaluation UI) | Done | Scope selector (team/service), time range (1–365 days), 6-tab results view (Overview, Config Map, Volume & Noise, Alert Sources, Tool Stack, Migration Plan) |
+| 12 (Report) | Done | Printable report page with print-button component |
+| 13 (Admin) | Done | User management, audit log viewer |
+| — (Scalability) | Done | DB indexes, selective configJson loading, log entry cap, gzip compression, POST method override for large payloads |
 
 ### Key Deviations from Original Spec
 
-1. **No Terraformer**: Config export uses PD REST API directly instead of shelling out to Terraformer. More portable, no binary dependency, and gives us richer config data (EO router rules, integration details).
-2. **No Inngest for evaluation runs**: Evaluations run directly in the tRPC mutation handler with SSE progress tracking via `jobProgress` service. Inngest is available but not required.
-3. **Next.js 15 (not 14)**: Using App Router with async params (`params: Promise<{id: string}>`).
+1. **No Terraformer**: Config export uses PD REST API directly instead of shelling out to Terraformer. More portable, no binary dependency, and gives richer config data (EO router rules, integration details, automation action invocation history).
+2. **No Inngest for evaluation runs**: Evaluations run directly in the tRPC mutation handler. Inngest is available for future use but not required for the current flow.
+3. **Next.js 16 (not 14)**: Using App Router with async params (`params: Promise<{id: string}>`).
 4. **"Shadow Stack" renamed to "Tool Stack"**: User-facing terminology. Internal types (`ShadowStackAnalysis`, `ShadowSignal`) retain original names for backward compat with stored data.
 5. **Compression utility**: `src/lib/compression.ts` provides gzip compression for Bytes fields with backward-compatible decompression fallback.
 6. **Project Plan module**: Added `src/server/services/analysis/project-plan.ts` — generates phased migration timeline with pilot recommendations, effort estimates, and wave assignments.
+7. **Cursor-based pagination**: Added `paginateAllCursor()` for PD Automation Actions API which uses `next_cursor` instead of offset/limit.
+8. **POST method override**: tRPC uses `methodOverride: "POST"` to avoid URI-too-large errors when analyzing large domains (200+ teams/services).
 
 ### Current Issues (Open)
 
-#### Source Detection — Still Ambiguous
-The source detection pipeline was overhauled to read `first_trigger_log_entry.channel.cef_details.source_component` (the actual monitoring tool name from the incident payload). However, results still show generic "Monitoring Integration" for all 1,298 incidents in the OrbitPay test domain. The PD API may not be returning expanded channel data despite `include[]=first_trigger_log_entry`, or the OrbitPay demo data may not have `cef_details` populated (synthetic/simulated events).
+#### Source Detection — Ambiguous on Synthetic Data
+The source detection pipeline reads `first_trigger_log_entry.channel.cef_details.source_component` (the actual monitoring tool name). Results show generic "Monitoring Integration" for all incidents in the OrbitPay test domain — likely because OrbitPay is a synthetic/simulated environment without real `cef_details` data. Needs validation against a real PD account.
 
 **Priority chain (current)**:
 1. Channel source (`cef_details.source_component`, `channel.source`, `channel.details.source`)
@@ -583,42 +587,23 @@ The source detection pipeline was overhauled to read `first_trigger_log_entry.ch
 5. Events API v2/v1 channel type + vendor integration lookup
 6. Fallback: "Monitoring Integration"
 
-**Next steps**: Inspect raw incident payloads from a real PD account to verify what fields are populated. The `first_trigger_log_entry` may need a separate GET call to `/log_entries/{id}` for full channel expansion (the `include[]` on `/incidents` may only embed a reference, not the full object).
+#### API-Resolved Incidents — Needs Real-Data Validation
+`apiResolvedPercent` tracking detects when `last_status_change_by.type` is `service_reference`, `integration_reference`, or `api_token_reference`. High API-resolve % (>50%) indicates external automation handling incident lifecycle. Needs validation against real PD account data.
 
-#### Tool Stack — Missing Integration Detection
-The Tool Stack tab detects signals from:
-- Log entries (API consumers, auto-ack/resolve patterns, enrichment middleware)
-- Config snapshot (extensions, webhooks, workflows, EO routing)
+### Enterprise Scalability
 
-But it does NOT currently detect:
-- **ServiceNow** (V2 extensions or OAuth-based integrations)
-- **Slack** (native PD Slack integration, not always an "extension")
-- **Microsoft Teams** (native PD Teams integration)
-- **Salesforce** (custom integration, usually API-based)
-- **JIRA** (V2 extension or Events API integration)
-
-These integrations are configured in PD differently depending on the vendor — some are V2 extensions with `extension_schema`, some are OAuth apps, some are native integrations that don't show up as classic extensions. Research needed on the best PD API endpoints to identify these (possibly `/services/{id}/integrations` vendor data, or `/extensions` with schema filtering).
-
-**Deferred**: User is researching PD integration detection patterns separately before building this.
-
-#### API-Resolved Incidents — New Signal
-Added `apiResolvedPercent` tracking to noise analysis. Detects when `last_status_change_by.type` is `service_reference`, `integration_reference`, or `api_token_reference`. High API-resolve % (>50%) indicates external automation handling the incident lifecycle — a strong shadow tool stack signal.
-
-Needs validation against real PD account data to confirm the `last_status_change_by.type` values are correct.
-
-### Enterprise Scalability (Phase done)
-
-Performance optimizations implemented:
+**Implemented:**
 - Database indexes on PdResource, Evaluation, MigrationMapping, ConfigSnapshot
 - Selective configJson loading (omit from main resource query, load separately for analysis types)
 - Log entry cap (`maxEntries: 50000`) to prevent OOM
 - Compression utility for Bytes fields (gzip with backward-compat fallback)
-- Hardened configJson parsing (Buffer/null/undefined safety in risk.ts)
+- Hardened configJson parsing (Buffer/null/undefined safety)
+- POST method override for tRPC to handle large payloads
 
-Still planned:
+**Planned (deferred until needed):**
 - Batch `createMany()` for config resources and migration mappings
 - tRPC response trimming (cap incidentAnalyses, exclude configJson from listings)
-- Streaming/chunked analysis for 200K+ incident evaluations (deferred until needed)
+- Streaming/chunked analysis for 200K+ incident evaluations
 
 ### Git History
 
@@ -634,3 +619,5 @@ Still planned:
 | `602796d` | Fix 365-day incident pull (179-day chunking) |
 | `0b797b4` | Fix source detection, noise ratio, tool stack rename, enterprise scalability |
 | `c9f01e1` | Read real alert source from incident channel data, track API-resolved % |
+| `4f2bcab` | Implement six-layer integration detection spec v2 |
+| `8ab496b` | Add Automation Actions integration, fix stat count bug, resolve URI-too-large |
