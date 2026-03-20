@@ -513,6 +513,12 @@ export const domainRouter = router({
         businessServices,
         rulesets,
         eventOrchestrations,
+        extensions,
+        webhookSubscriptions,
+        incidentWorkflowsList,
+        slackConnections,
+        automationActions,
+        automationRunners,
       ] = await Promise.all([
         pdClient.listServices(),
         pdClient.listTeams(),
@@ -522,7 +528,89 @@ export const domainRouter = router({
         pdClient.listBusinessServices(),
         pdClient.getRulesets(),
         pdClient.listEventOrchestrations(),
+        pdClient.listExtensions().catch(() => []),
+        pdClient.listWebhookSubscriptions(),
+        pdClient.listIncidentWorkflows(),
+        pdClient.getSlackConnections(),
+        pdClient.listAutomationActions(),
+        pdClient.listAutomationRunners(),
       ]);
+
+      // Fetch full detail (steps + triggers) for each workflow
+      // The list endpoint does NOT return steps/triggers — must fetch individually
+      console.log(`[Sync Config] Fetching details for ${incidentWorkflowsList.length} workflows...`);
+      const workflowDetailResults = await Promise.allSettled(
+        incidentWorkflowsList.map((wf) => pdClient.getIncidentWorkflowDetail(wf.id))
+      );
+
+      const incidentWorkflows = incidentWorkflowsList.map((wf, i) => {
+        const detail = workflowDetailResults[i];
+        if (detail.status === 'fulfilled' && detail.value) {
+          const d = detail.value;
+          console.log(`[Sync Config] Workflow "${wf.name}" (${wf.id}): ${d.steps?.length ?? 0} steps, ${d.triggers?.length ?? 0} triggers`);
+          if (d.steps && d.steps.length > 0) {
+            const actionIds = d.steps.map((s: any) => s.action_configuration?.action_id).filter(Boolean);
+            console.log(`[Sync Config]   action_ids: ${actionIds.join(', ')}`);
+          }
+          return { ...wf, steps: d.steps, triggers: d.triggers };
+        }
+        if (detail.status === 'rejected') {
+          console.warn(`[Sync Config] Workflow "${wf.name}" detail fetch rejected:`, (detail as PromiseRejectedResult).reason);
+        } else {
+          console.warn(`[Sync Config] Workflow "${wf.name}" detail fetch returned null`);
+        }
+        return wf;
+      });
+
+      const withSteps = incidentWorkflows.filter(wf => wf.steps && wf.steps.length > 0);
+      console.log(`[Sync Config] Workflow enrichment: ${withSteps.length}/${incidentWorkflows.length} workflows have steps`);
+
+      // Fetch invocation history for each automation action (parallel, capped)
+      console.log(`[Sync Config] Fetching invocations for ${automationActions.length} automation actions...`);
+      const invocationResults = await Promise.allSettled(
+        automationActions.map((action) =>
+          pdClient.getAutomationActionInvocations(action.id, 5000)
+        )
+      );
+
+      // Build enriched automation action data with invocation summaries
+      const enrichedAutomationActions = automationActions.map((action, i) => {
+        const invResult = invocationResults[i];
+        const invocations = invResult.status === 'fulfilled' ? invResult.value : [];
+
+        // Count invocations by source type
+        const sourceCounts: Record<string, number> = {};
+        const stateCounts: Record<string, number> = {};
+        const monthlyCounts: Record<string, number> = {};
+
+        for (const inv of invocations) {
+          const agentType = inv.metadata?.agent?.type || 'unknown';
+          sourceCounts[agentType] = (sourceCounts[agentType] || 0) + 1;
+
+          const state = inv.state || 'unknown';
+          stateCounts[state] = (stateCounts[state] || 0) + 1;
+
+          // Monthly bucketing
+          const timing = inv.timing || [];
+          for (const t of timing) {
+            if (t.state === 'created' && t.creation_timestamp) {
+              const month = t.creation_timestamp.slice(0, 7); // YYYY-MM
+              monthlyCounts[month] = (monthlyCounts[month] || 0) + 1;
+              break;
+            }
+          }
+        }
+
+        console.log(`[Sync Config]   Action "${action.name}": ${invocations.length} invocations`);
+
+        return {
+          ...action,
+          _invocationCount: invocations.length,
+          _sourceCounts: sourceCounts,
+          _stateCounts: stateCounts,
+          _monthlyCounts: monthlyCounts,
+        };
+      });
 
       // Build resource records with full PD config stored per resource
       type ResourceEntry = {
@@ -627,20 +715,54 @@ export const domainRouter = router({
         const routerResult = eoRouterResults[i];
         const routerRules = routerResult.status === 'fulfilled' ? routerResult.value : null;
 
-        // Extract service IDs that this orchestration dynamically routes to
+        // Extract service IDs that this orchestration routes to
+        // PD API returns route_to in multiple formats:
+        //   - Static: route_to: "SERVICE_ID" (plain string)
+        //   - Static nested: route_to: { service: { id: "SERVICE_ID" } }
+        //   - Dynamic: dynamic_route_to: { lookup_by, regex, source }
         const routedServiceIds: string[] = [];
+        let dynamicRouteCount = 0;
+        let staticRouteCount = 0;
+
+        const extractRouteToServiceId = (actions: any): string | null => {
+          if (!actions) return null;
+          const routeTo = actions.route_to;
+          if (!routeTo || routeTo === 'unrouted') return null;
+          // Plain string service ID
+          if (typeof routeTo === 'string') return routeTo;
+          // Nested object { service: { id: "..." } }
+          if (routeTo?.service?.id) return routeTo.service.id;
+          // Direct ID field
+          if (routeTo?.id) return routeTo.id;
+          return null;
+        };
+
         if (routerRules?.sets) {
           for (const set of routerRules.sets) {
             for (const rule of (set.rules || [])) {
-              const serviceId = rule?.actions?.route_to?.service?.id;
-              if (serviceId) routedServiceIds.push(serviceId);
+              // Check for dynamic routing
+              if (rule?.actions?.dynamic_route_to) {
+                dynamicRouteCount++;
+              }
+              // Check for static routing
+              const serviceId = extractRouteToServiceId(rule?.actions);
+              if (serviceId) {
+                routedServiceIds.push(serviceId);
+                staticRouteCount++;
+              }
             }
           }
         }
         // Also check catch_all
-        if (routerRules?.catch_all?.actions?.route_to?.service?.id) {
-          routedServiceIds.push(routerRules.catch_all.actions.route_to.service.id);
+        const catchAllServiceId = extractRouteToServiceId(routerRules?.catch_all?.actions);
+        if (catchAllServiceId) {
+          routedServiceIds.push(catchAllServiceId);
+          staticRouteCount++;
         }
+
+        const totalRuleCount = (routerRules?.sets || []).reduce(
+          (n: number, s: any) => n + (s.rules?.length || 0), 0
+        );
 
         resources[eo.id] = {
           pdId: eo.id,
@@ -648,7 +770,116 @@ export const domainRouter = router({
           name: eo.name || "",
           teamIds: eo.team?.id ? [eo.team.id] : [],
           dependencies: routedServiceIds, // Services this EO routes to
-          configJson: { ...eo, _routerRules: routerRules, _routedServiceIds: routedServiceIds },
+          configJson: {
+            ...eo,
+            _routerRules: routerRules,
+            _routedServiceIds: routedServiceIds,
+            _dynamicRouteCount: dynamicRouteCount,
+            _staticRouteCount: staticRouteCount,
+            _totalRuleCount: totalRuleCount,
+          },
+        };
+      }
+
+      // Add extensions (ServiceNow, Slack, JIRA, MS Teams, etc.)
+      for (const ext of extensions) {
+        const extServiceIds = (ext.extension_objects || [])
+          .filter((eo: any) => eo.type === 'service_reference')
+          .map((eo: any) => eo.id);
+        resources[ext.id] = {
+          pdId: ext.id,
+          type: "EXTENSION",
+          name: ext.name || ext.extension_schema?.summary || 'Extension',
+          teamIds: [],
+          dependencies: extServiceIds,
+          configJson: {
+            extension_schema: ext.extension_schema,
+            endpoint_url: ext.endpoint_url,
+            extension_objects: ext.extension_objects,
+            temporarily_disabled: ext.temporarily_disabled,
+          },
+        };
+      }
+
+      // Add webhook subscriptions
+      for (const wh of webhookSubscriptions) {
+        resources[wh.id] = {
+          pdId: wh.id,
+          type: "WEBHOOK_SUBSCRIPTION",
+          name: wh.description || `Webhook → ${wh.delivery_method?.url || 'unknown'}`,
+          teamIds: [],
+          dependencies: wh.filter?.id ? [wh.filter.id] : [],
+          configJson: {
+            delivery_method: wh.delivery_method,
+            events: wh.events,
+            filter: wh.filter,
+            active: wh.active,
+          },
+        };
+      }
+
+      // Add incident workflows with full step/trigger detail for integration detection
+      for (const wf of incidentWorkflows) {
+        resources[wf.id] = {
+          pdId: wf.id,
+          type: "INCIDENT_WORKFLOW",
+          name: wf.name || 'Incident Workflow',
+          teamIds: wf.team?.id ? [wf.team.id] : [],
+          dependencies: [],
+          configJson: {
+            steps: wf.steps || [],
+            triggers: (wf as any).triggers || [],
+            team: wf.team,
+            description: wf.description,
+            _slackConnections: slackConnections.length > 0 ? slackConnections : undefined,
+          },
+        };
+      }
+
+      // Add automation actions with invocation data
+      for (const action of enrichedAutomationActions) {
+        resources[action.id] = {
+          pdId: action.id,
+          type: "AUTOMATION_ACTION",
+          name: action.name || 'Automation Action',
+          teamIds: [],
+          dependencies: action.services?.map((s: any) => s.id) || [],
+          configJson: {
+            action_type: action.action_type,
+            runner_type: action.runner_type,
+            runner: action.runner,
+            description: action.description,
+            creation_time: action.creation_time,
+            last_run: action.last_run,
+            last_run_by: action.last_run_by,
+            allow_invocation_manually: action.allow_invocation_manually,
+            allow_invocation_from_event_orchestration: action.allow_invocation_from_event_orchestration,
+            map_to_all_services: action.map_to_all_services,
+            action_data_reference: action.action_data_reference,
+            services: action.services,
+            _invocationCount: action._invocationCount,
+            _sourceCounts: action._sourceCounts,
+            _stateCounts: action._stateCounts,
+            _monthlyCounts: action._monthlyCounts,
+          },
+        };
+      }
+
+      // Add automation runners
+      for (const runner of automationRunners) {
+        resources[runner.id] = {
+          pdId: runner.id,
+          type: "AUTOMATION_RUNNER",
+          name: runner.name || 'Automation Runner',
+          teamIds: [],
+          dependencies: [],
+          configJson: {
+            runner_type: runner.runner_type,
+            status: runner.status,
+            description: runner.description,
+            last_seen: runner.last_seen,
+            creation_time: runner.creation_time,
+          },
         };
       }
 
@@ -662,6 +893,11 @@ export const domainRouter = router({
         BUSINESS_SERVICE: businessServices.length,
         RULESET: rulesets.length,
         EVENT_ORCHESTRATION: eventOrchestrations.length,
+        EXTENSION: extensions.length,
+        WEBHOOK_SUBSCRIPTION: webhookSubscriptions.length,
+        INCIDENT_WORKFLOW: incidentWorkflows.length,
+        AUTOMATION_ACTION: automationActions.length,
+        AUTOMATION_RUNNER: automationRunners.length,
       };
 
       // Store snapshot — resourcesJson contains the full indexed config map

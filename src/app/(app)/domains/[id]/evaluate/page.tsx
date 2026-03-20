@@ -27,6 +27,7 @@ interface ScopeOption {
 }
 
 const TIME_RANGE_OPTIONS = [
+  { label: "1 Day", value: "1" },
   { label: "7 Days", value: "7" },
   { label: "30 Days", value: "30" },
   { label: "90 Days", value: "90" },
@@ -47,7 +48,7 @@ export default function EvaluatePage() {
 
   const [scopeType, setScopeType] = useState<"TEAM" | "SERVICE">("SERVICE");
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [timeRange, setTimeRange] = useState<"7" | "30" | "90" | "365">("90");
+  const [timeRange, setTimeRange] = useState<"1" | "7" | "30" | "90" | "365">("90");
   const [searchQuery, setSearchQuery] = useState("");
   const [expandedDetails, setExpandedDetails] = useState<Set<string>>(new Set());
 
@@ -329,11 +330,11 @@ export default function EvaluatePage() {
           <CardDescription>Select the period to analyze</CardDescription>
         </CardHeader>
         <CardContent>
-          <div className="grid grid-cols-3 gap-4">
+          <div className="grid grid-cols-5 gap-3">
             {TIME_RANGE_OPTIONS.map((option) => (
               <button
                 key={option.value}
-                onClick={() => setTimeRange(option.value as "7" | "30" | "90" | "365")}
+                onClick={() => setTimeRange(option.value as "1" | "7" | "30" | "90" | "365")}
                 className={`p-4 rounded-lg border-2 text-center transition-colors ${
                   timeRange === option.value
                     ? "border-primary bg-primary-light"

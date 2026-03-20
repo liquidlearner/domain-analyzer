@@ -8,6 +8,7 @@ const handler = (req: Request) =>
     req,
     router: appRouter,
     createContext,
+    allowMethodOverride: true,
     onError: ({ path, error }) => {
       console.error(`Error in tRPC handler on path '${path}':`, error);
     },

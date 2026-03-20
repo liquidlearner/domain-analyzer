@@ -17,6 +17,9 @@ import type {
   PDAlert,
   PDSlackConnection,
   PDPaginatedResponse,
+  PDAutomationAction,
+  PDAutomationRunner,
+  PDAutomationInvocation,
 } from "./types";
 
 interface RateLimitState {
@@ -268,10 +271,18 @@ export class PagerDutyClient {
     try {
       const response = await this.request<{ incident_workflow: PDIncidentWorkflow }>(
         "GET",
-        `/incident_workflows/${workflowId}`
+        `/incident_workflows/${workflowId}`,
+        { include: ["steps", "triggers"] }
       );
-      return response.incident_workflow || null;
-    } catch {
+      const wf = response.incident_workflow || null;
+      if (wf) {
+        console.log(`[PD Client] Workflow ${workflowId} detail: ${wf.steps?.length ?? 0} steps, ${wf.triggers?.length ?? 0} triggers`);
+      } else {
+        console.warn(`[PD Client] Workflow ${workflowId} detail: response had no incident_workflow key`);
+      }
+      return wf;
+    } catch (error) {
+      console.warn(`[PD Client] Failed to fetch workflow detail for ${workflowId}:`, error instanceof Error ? error.message : error);
       return null;
     }
   }
@@ -396,6 +407,58 @@ export class PagerDutyClient {
       `/event_orchestrations/${orchestrationId}/router`
     );
     return response.orchestration_path || response;
+  }
+
+  // ── Automation Actions API (cursor-based pagination) ──
+
+  /**
+   * List all automation actions in the domain.
+   * Uses cursor-based pagination (not offset/limit).
+   */
+  async listAutomationActions(): Promise<PDAutomationAction[]> {
+    try {
+      return await this.paginateAllCursor<PDAutomationAction>(
+        "/automation_actions/actions",
+        "actions"
+      );
+    } catch {
+      // automation_actions may not be available on all plan tiers
+      return [];
+    }
+  }
+
+  /**
+   * List all automation runners in the domain.
+   */
+  async listAutomationRunners(): Promise<PDAutomationRunner[]> {
+    try {
+      return await this.paginateAllCursor<PDAutomationRunner>(
+        "/automation_actions/runners",
+        "runners"
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get invocation history for a specific automation action.
+   * Returns all invocations (cursor-paginated).
+   */
+  async getAutomationActionInvocations(
+    actionId: string,
+    maxEntries?: number
+  ): Promise<PDAutomationInvocation[]> {
+    try {
+      return await this.paginateAllCursor<PDAutomationInvocation>(
+        "/automation_actions/invocations",
+        "invocations",
+        { action_id: actionId },
+        maxEntries
+      );
+    } catch {
+      return [];
+    }
   }
 
   /**
@@ -542,6 +605,50 @@ export class PagerDutyClient {
 
       if (onPage) {
         onPage(allResults.length, hasMore);
+      }
+    }
+
+    return allResults;
+  }
+
+  /**
+   * Auto-paginate through all results using cursor-based pagination.
+   * Used by automation actions endpoints which use `next_cursor` instead of offset/limit.
+   */
+  private async paginateAllCursor<T>(
+    path: string,
+    resourceKey: string,
+    params?: Record<string, any>,
+    maxEntries?: number
+  ): Promise<T[]> {
+    const allResults: T[] = [];
+    let cursor: string | undefined;
+
+    while (true) {
+      const paginatedParams: Record<string, any> = {
+        ...params,
+        limit: 25,
+      };
+      if (cursor) {
+        paginatedParams.cursor = cursor;
+      }
+
+      const response = await this.request<{
+        [key: string]: T[] | any;
+      }>("GET", path, paginatedParams);
+
+      const items = (response as any)[resourceKey] || [];
+      allResults.push(...items);
+
+      cursor = (response as any).next_cursor;
+
+      // Cap total entries
+      if (maxEntries && allResults.length >= maxEntries) {
+        break;
+      }
+
+      if (!cursor) {
+        break;
       }
     }
 

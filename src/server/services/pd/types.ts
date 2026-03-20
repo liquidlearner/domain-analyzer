@@ -410,6 +410,60 @@ export interface PDSlackConnection {
   config?: Record<string, any>;
 }
 
+export interface PDAutomationAction {
+  id: string;
+  type?: string;
+  name?: string;
+  description?: string;
+  action_type?: "process_automation" | "script";
+  runner_type?: string;
+  runner?: string | { id: string; type?: string; summary?: string };
+  creation_time?: string;
+  last_run?: string;
+  last_run_by?: { id: string; type?: string };
+  allow_invocation_manually?: boolean;
+  allow_invocation_from_event_orchestration?: boolean;
+  map_to_all_services?: boolean;
+  action_data_reference?: {
+    process_automation_job_id?: string;
+    process_automation_job_arguments?: string;
+    script?: string;
+  };
+  services?: Array<{ id: string; type: string; summary?: string }>;
+}
+
+export interface PDAutomationRunner {
+  id: string;
+  type?: string;
+  name?: string;
+  description?: string;
+  runner_type?: string;
+  status?: string;
+  last_seen?: string;
+  creation_time?: string;
+}
+
+export interface PDAutomationInvocation {
+  id: string;
+  action_id?: string;
+  state?: string;
+  duration?: number;
+  metadata?: {
+    agent?: {
+      type?: string; // 'user_reference' | 'event_orchestration_reference' | 'incident_workflow_reference'
+      id?: string;
+    };
+    incident?: {
+      id?: string;
+      type?: string;
+    };
+  };
+  timing?: Array<{
+    state?: string;
+    creation_timestamp?: string;
+  }>;
+}
+
 export interface PDPaginatedResponse<T> {
   limit: number;
   offset: number;

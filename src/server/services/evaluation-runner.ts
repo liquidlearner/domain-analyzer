@@ -74,7 +74,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
 
     // Selectively load configJson only for resource types that need it during analysis
     // Use raw SQL to avoid Turbopack enum resolution issues with Prisma's `in` filter
-    const CONFIG_TYPES = new Set(['EVENT_ORCHESTRATION', 'EXTENSION', 'WEBHOOK_SUBSCRIPTION', 'INCIDENT_WORKFLOW'])
+    const CONFIG_TYPES = new Set(['EVENT_ORCHESTRATION', 'EXTENSION', 'WEBHOOK_SUBSCRIPTION', 'INCIDENT_WORKFLOW', 'AUTOMATION_ACTION', 'AUTOMATION_RUNNER'])
     const resourcesWithConfig = await prisma.pdResource.findMany({
       where: { snapshotId: latestSnapshot.id },
       select: { id: true, pdId: true, pdType: true, name: true, configJson: true },
@@ -127,16 +127,29 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
 
     // Build orchestration → service routing map from stored config
     const eoResources = resourcesByType.get('EVENT_ORCHESTRATION') || []
+    console.log(`[EvaluationRunner] Found ${eoResources.length} EVENT_ORCHESTRATION resources in snapshot`)
     // Map: serviceId → list of orchestrations that route to it
-    const serviceToOrchestrations = new Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number; eoIntegrationNames: string[] }>>()
+    const serviceToOrchestrations = new Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number; dynamicRouteCount: number; eoIntegrationNames: string[] }>>()
+    // Also track all EOs for account-level analysis (even those without explicit service routing)
+    const allEoDetails: Array<{ eoName: string; eoPdId: string; ruleCount: number; dynamicRouteCount: number; staticRouteCount: number; routedServiceIds: string[]; eoIntegrationNames: string[] }> = []
+
     for (const eo of eoResources) {
       try {
         const rawConfig = configJsonByPdId.get(eo.pdId)
-        if (!rawConfig) continue
+        if (!rawConfig) {
+          console.log(`[EvaluationRunner]   EO "${eo.name}" (${eo.pdId}): no configJson in map`)
+          continue
+        }
         const config = decompressJson(rawConfig)
         const routedServiceIds: string[] = config._routedServiceIds || []
-        const routerRules = config._routerRules
-        const ruleCount = routerRules?.sets?.reduce((n: number, s: any) => n + (s.rules?.length || 0), 0) || 0
+        const dynamicRouteCount: number = config._dynamicRouteCount || 0
+        const staticRouteCount: number = config._staticRouteCount || 0
+        const ruleCount: number = config._totalRuleCount || 0
+
+        // Fallback: if _totalRuleCount wasn't stored, calculate from raw rules
+        const fallbackRuleCount = ruleCount || (config._routerRules?.sets?.reduce((n: number, s: any) => n + (s.rules?.length || 0), 0) || 0)
+
+        console.log(`[EvaluationRunner]   EO "${eo.name}" (${eo.pdId}): ${fallbackRuleCount} rules (${dynamicRouteCount} dynamic, ${staticRouteCount} static), ${routedServiceIds.length} routed services`)
 
         // Extract EO integration names for upstream source identification
         const eoIntegrations: any[] = config.integrations || []
@@ -144,15 +157,20 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
           .map((i: any) => i.label || i.summary || i.type || '')
           .filter((n: string) => n && n !== 'Unknown')
 
+        const eoDetail = { eoName: eo.name, eoPdId: eo.pdId, ruleCount: fallbackRuleCount, dynamicRouteCount, staticRouteCount, routedServiceIds, eoIntegrationNames }
+        allEoDetails.push(eoDetail)
+
+        // Map routed services to EOs
         for (const svcId of routedServiceIds) {
           const existing = serviceToOrchestrations.get(svcId) || []
-          existing.push({ eoName: eo.name, eoPdId: eo.pdId, ruleCount, eoIntegrationNames })
+          existing.push({ eoName: eo.name, eoPdId: eo.pdId, ruleCount: fallbackRuleCount, dynamicRouteCount, eoIntegrationNames })
           serviceToOrchestrations.set(svcId, existing)
         }
-      } catch {
-        // configJson parse failed, skip
+      } catch (err) {
+        console.warn(`[EvaluationRunner]   EO "${eo.name}" (${eo.pdId}): configJson parse failed:`, err instanceof Error ? err.message : err)
       }
     }
+    console.log(`[EvaluationRunner] serviceToOrchestrations map: ${serviceToOrchestrations.size} services have EO routing, ${allEoDetails.length} total EOs with rules`)
 
     // Determine which service PD IDs are in scope
     let scopedServicePdIds: Set<string>
@@ -469,7 +487,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     jobProgress.updateProgress(jobId, { status: 'running', progress: 84, message: 'Detecting shadow stack integrations...' })
     // Gather account-level resources (extensions, webhooks, workflows) for shadow stack detection
     const accountLevelResources = allResources
-      .filter((r) => ['EXTENSION', 'WEBHOOK_SUBSCRIPTION', 'INCIDENT_WORKFLOW'].includes(r.pdType))
+      .filter((r) => ['EXTENSION', 'WEBHOOK_SUBSCRIPTION', 'INCIDENT_WORKFLOW', 'AUTOMATION_ACTION'].includes(r.pdType))
       .map((r) => {
         let configJson: any = {}
         const rawConfig = configJsonByPdId.get(r.pdId)
@@ -478,7 +496,17 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
         }
         return { pdId: r.pdId, pdType: r.pdType, name: r.name, configJson }
       })
-    const shadowStackAnalysis = analyzeShadowStack(incidents, logEntries, services, integrationsMap, serviceToOrchestrations, accountLevelResources)
+    // Diagnostic: log what workflow data we have for integration detection
+    const workflowResources = accountLevelResources.filter(r => r.pdType === 'INCIDENT_WORKFLOW')
+    console.log(`[EvaluationRunner] accountLevelResources: ${accountLevelResources.length} total (${workflowResources.length} workflows)`)
+    for (const wr of workflowResources) {
+      const steps = wr.configJson?.steps || []
+      const triggers = wr.configJson?.triggers || []
+      const actionIds = steps.map((s: any) => s.action_configuration?.action_id).filter(Boolean)
+      console.log(`[EvaluationRunner]   Workflow "${wr.name}": ${steps.length} steps, ${triggers.length} triggers, action_ids=[${actionIds.join(', ')}]`)
+    }
+
+    const shadowStackAnalysis = analyzeShadowStack(incidents, logEntries, services, integrationsMap, serviceToOrchestrations, accountLevelResources, allEoDetails)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 88, message: 'Calculating risk assessment...' })
     // Only pass scoped resources into risk analysis — enrich with parsed configJson

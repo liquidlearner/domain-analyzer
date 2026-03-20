@@ -10,7 +10,7 @@ const createEvaluationInput = z.object({
   domainId: z.string().cuid(),
   scopeType: z.enum(['TEAM', 'SERVICE']),
   scopeIds: z.array(z.string()).min(1),
-  timeRangeDays: z.enum(['7', '30', '90', '365']).default('30'),
+  timeRangeDays: z.enum(['1', '7', '30', '90', '365']).default('30'),
 })
 
 const evaluationIdInput = z.object({

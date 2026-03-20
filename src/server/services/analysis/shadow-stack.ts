@@ -4,6 +4,31 @@ export interface IncidentIoReplacement {
   effort: string
 }
 
+export interface WorkflowReference {
+  workflowId: string
+  workflowName: string
+  actions: string[]
+  triggerType: string // 'auto-triggered' | 'manual'
+}
+
+export interface WebhookReference {
+  subscriptionId: string
+  name: string
+  url: string
+  active: boolean
+}
+
+export interface AutomationActionReference {
+  actionId: string
+  actionName: string
+  actionType: string // 'process_automation' | 'script'
+  totalExecutions: number
+  primaryTrigger: string // 'Event Orchestration' | 'Manual' | 'Incident Workflow' | 'Never executed'
+  lastRun?: string
+  stateCounts: Record<string, number>
+  monthlyCounts: Record<string, number>
+}
+
 export interface ShadowSignal {
   type:
     | 'api_consumer'
@@ -17,12 +42,16 @@ export interface ShadowSignal {
     | 'terraform_consumer'
     | 'analytics_pipeline'
     | 'workflow_integration'
+    | 'automation_action'
   confidence: 'high' | 'medium' | 'low'
   evidence: string
   description: string
   serviceId?: string
   serviceName?: string
   count?: number // deduplicated occurrence count
+  workflowReferences?: WorkflowReference[] // grouped workflow detail for workflow_integration signals
+  webhookReferences?: WebhookReference[] // grouped webhook detail for webhook_destination signals
+  automationActionReferences?: AutomationActionReference[] // grouped automation action detail
   incidentIoReplacement: IncidentIoReplacement
 }
 
@@ -94,6 +123,11 @@ const REPLACEMENT_MAP: Record<ShadowSignal['type'], IncidentIoReplacement> = {
     action: 'Recreate PagerDuty Incident Workflow actions as incident.io Workflow steps. Native integrations (Slack, MS Teams, Jira) are built-in.',
     effort: 'Low-Medium — native integrations map directly',
   },
+  automation_action: {
+    feature: 'incident.io Workflows + Runbooks',
+    action: 'Migrate PagerDuty Automation Actions to incident.io Workflows for orchestration-triggered actions, or Runbooks for manual diagnostics. Process automation jobs can be triggered via workflow HTTP steps.',
+    effort: 'Medium-High — depends on runner/job complexity',
+  },
 }
 
 export interface AccountLevelResource {
@@ -103,14 +137,25 @@ export interface AccountLevelResource {
   configJson?: any
 }
 
+export interface EoDetail {
+  eoName: string
+  eoPdId: string
+  ruleCount: number
+  dynamicRouteCount: number
+  staticRouteCount: number
+  routedServiceIds: string[]
+  eoIntegrationNames: string[]
+}
+
 // ── Main analysis function ───────────────────────────────────────────
 export function analyzeShadowStack(
   incidents: any[],
   logEntries: any[],
   services: any[],
   integrations: Map<string, any[]>,
-  serviceToOrchestrations?: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number; eoIntegrationNames?: string[] }>>,
-  accountResources?: AccountLevelResource[]
+  serviceToOrchestrations?: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number; dynamicRouteCount?: number; eoIntegrationNames?: string[] }>>,
+  accountResources?: AccountLevelResource[],
+  allEoDetails?: EoDetail[]
 ): ShadowStackAnalysis {
   // Collect raw signals then deduplicate
   const rawSignals: Array<Omit<ShadowSignal, 'count' | 'incidentIoReplacement'>> = []
@@ -335,10 +380,38 @@ export function analyzeShadowStack(
   })
 
   // ── Detect EO routing layer dependencies ──
-  if (serviceToOrchestrations) {
-    const seenEOs = new Set<string>()
-    serviceToOrchestrations.forEach((eos, serviceId) => {
-      const serviceName = serviceMap.get(serviceId) || 'Unknown'
+  // Use allEoDetails (all EOs with their routing info) if available, falling back to serviceToOrchestrations
+  const seenEOs = new Set<string>()
+
+  if (allEoDetails && allEoDetails.length > 0) {
+    // Full EO detail available — detect all EOs with any routing rules
+    for (const eo of allEoDetails) {
+      if (seenEOs.has(eo.eoPdId)) continue
+      if (eo.ruleCount === 0) continue // No rules at all — skip
+
+      seenEOs.add(eo.eoPdId)
+      eoRoutingLayerCount++
+
+      const routeDesc: string[] = []
+      if (eo.dynamicRouteCount > 0) routeDesc.push(`${eo.dynamicRouteCount} dynamic route${eo.dynamicRouteCount > 1 ? 's' : ''}`)
+      if (eo.staticRouteCount > 0) routeDesc.push(`${eo.staticRouteCount} static route${eo.staticRouteCount > 1 ? 's' : ''}`)
+      if (eo.routedServiceIds.length > 0) {
+        const svcNames = eo.routedServiceIds.map(id => serviceMap.get(id) || id).slice(0, 3)
+        routeDesc.push(`targets: ${svcNames.join(', ')}${eo.routedServiceIds.length > 3 ? ` + ${eo.routedServiceIds.length - 3} more` : ''}`)
+      }
+
+      rawSignals.push({
+        type: 'eo_routing_layer',
+        confidence: 'high',
+        evidence: `"${eo.eoName}" — ${eo.ruleCount} routing rule${eo.ruleCount > 1 ? 's' : ''}: ${routeDesc.join(', ')}${eo.eoIntegrationNames.length > 0 ? `. Integrations: ${eo.eoIntegrationNames.join(', ')}` : ''}`,
+        description: `Event Orchestration: ${eo.eoName}`,
+        serviceId: eo.eoPdId,
+        serviceName: eo.eoName,
+      })
+    }
+  } else if (serviceToOrchestrations) {
+    // Fallback: use serviceToOrchestrations map (only EOs with explicit service routing)
+    serviceToOrchestrations.forEach((eos) => {
       for (const eo of eos) {
         if (!seenEOs.has(eo.eoPdId) && eo.ruleCount >= 1) {
           seenEOs.add(eo.eoPdId)
@@ -346,8 +419,8 @@ export function analyzeShadowStack(
           rawSignals.push({
             type: 'eo_routing_layer',
             confidence: 'high',
-            evidence: `"${eo.eoName}" routes to ${serviceToOrchestrations.size} services via ${eo.ruleCount} dynamic rules`,
-            description: `Global Event Orchestration "${eo.eoName}" is a routing dependency`,
+            evidence: `"${eo.eoName}" routes via ${eo.ruleCount} rules`,
+            description: `Event Orchestration: ${eo.eoName}`,
             serviceId: eo.eoPdId,
             serviceName: eo.eoName,
           })
@@ -393,13 +466,43 @@ export function analyzeShadowStack(
       if (resource.pdType === 'WEBHOOK_SUBSCRIPTION') {
         webhookDestinationCount++
         const url = resource.configJson?.delivery_method?.url || 'unknown'
+        // Extract vendor/target from URL or name for grouping
+        let webhookVendor = 'Other'
+        const urlLower = url.toLowerCase()
+        const nameLowerWh = nameLower
+        if (urlLower.includes('servicenow') || urlLower.includes('service-now') || nameLowerWh.includes('servicenow') || nameLowerWh.includes('snow')) {
+          webhookVendor = 'ServiceNow'
+        } else if (urlLower.includes('slack') || nameLowerWh.includes('slack')) {
+          webhookVendor = 'Slack'
+        } else if (urlLower.includes('teams.microsoft') || nameLowerWh.includes('teams')) {
+          webhookVendor = 'Microsoft Teams'
+        } else if (urlLower.includes('jira') || urlLower.includes('atlassian') || nameLowerWh.includes('jira')) {
+          webhookVendor = 'Jira'
+        } else if (urlLower.includes('datadog') || nameLowerWh.includes('datadog')) {
+          webhookVendor = 'Datadog'
+        } else {
+          // Try to extract domain from URL
+          try {
+            const urlObj = new URL(url)
+            webhookVendor = urlObj.hostname.replace('www.', '').split('.')[0]
+            // Capitalize first letter
+            webhookVendor = webhookVendor.charAt(0).toUpperCase() + webhookVendor.slice(1)
+          } catch { /* keep 'Other' */ }
+        }
+
         rawSignals.push({
           type: 'webhook_destination',
           confidence: 'high',
           evidence: `Webhook subscription → ${url}${resource.configJson?.active === false ? ' (inactive)' : ''}`,
-          description: `Outbound webhook: ${resource.name}`,
+          description: `${webhookVendor} webhook subscriptions`,
           serviceId: resource.pdId,
           serviceName: resource.name,
+          webhookReferences: [{
+            subscriptionId: resource.pdId,
+            name: resource.name,
+            url,
+            active: resource.configJson?.active !== false,
+          }],
         })
       }
 
@@ -414,14 +517,27 @@ export function analyzeShadowStack(
         const PD_NATIVE_VENDORS = new Set(['incident-workflows', 'logic', 'roles', 'tasks'])
         const externalVendors = new Map<string, string[]>() // vendor → list of action descriptions
 
+        // Actions that live under PD-native vendors but represent external dependencies
+        const EXTERNAL_ACTIONS: Record<string, string> = {
+          'post-to-external-status-page': 'status-pages', // maps to status-pages vendor for display
+        }
+
         for (const step of steps) {
           const actionId = step.action_configuration?.action_id || ''
           const parts = actionId.split(':')
           if (parts.length >= 3 && parts[0] === 'pagerduty.com') {
             const vendor = parts[1]
-            if (!PD_NATIVE_VENDORS.has(vendor)) {
+            const action = parts[2]
+
+            // Check if this is an external action hiding under a native vendor
+            const overrideVendor = EXTERNAL_ACTIONS[action]
+            if (overrideVendor) {
+              const actions = externalVendors.get(overrideVendor) || []
+              actions.push(step.name || action)
+              externalVendors.set(overrideVendor, actions)
+            } else if (!PD_NATIVE_VENDORS.has(vendor)) {
               const actions = externalVendors.get(vendor) || []
-              actions.push(step.name || parts[2] || 'unknown action')
+              actions.push(step.name || action || 'unknown action')
               externalVendors.set(vendor, actions)
             }
           }
@@ -462,6 +578,12 @@ export function analyzeShadowStack(
               description: `${displayName} integration via Incident Workflow`,
               serviceId: resource.pdId,
               serviceName: resource.name,
+              workflowReferences: [{
+                workflowId: resource.pdId,
+                workflowName: resource.name,
+                actions: uniqueActions,
+                triggerType: triggerLabel,
+              }],
             })
           }
         } else {
@@ -480,25 +602,147 @@ export function analyzeShadowStack(
     }
   }
 
-  // ── Deduplicate: group by (type, serviceId) and add counts ──
-  const dedupKey = (s: typeof rawSignals[0]) => `${s.type}:${s.serviceId || 'global'}`
-  const dedupMap = new Map<string, { signal: typeof rawSignals[0]; count: number }>()
+  // ── Detect automation actions (Runbook Automation / Process Automation) ──
+  if (accountResources) {
+    const automationActionResources = accountResources.filter(r => r.pdType === 'AUTOMATION_ACTION')
+
+    if (automationActionResources.length > 0) {
+      // Group automation actions by primary trigger source for meaningful grouping
+      const activeActions: AutomationActionReference[] = []
+      const dormantActions: AutomationActionReference[] = []
+      let totalAutomationExecutions = 0
+
+      for (const resource of automationActionResources) {
+        const config = resource.configJson || {}
+        const invocationCount: number = config._invocationCount || 0
+        const sourceCounts: Record<string, number> = config._sourceCounts || {}
+        const stateCounts: Record<string, number> = config._stateCounts || {}
+        const monthlyCounts: Record<string, number> = config._monthlyCounts || {}
+        const actionType: string = config.action_type || 'unknown'
+
+        totalAutomationExecutions += invocationCount
+
+        // Determine primary trigger
+        let primaryTrigger = 'Never executed'
+        if (invocationCount > 0) {
+          const eoCount = sourceCounts['event_orchestration_reference'] || 0
+          const userCount = sourceCounts['user_reference'] || 0
+          const wfCount = sourceCounts['incident_workflow_reference'] || 0
+          const maxSource = Math.max(eoCount, userCount, wfCount)
+          if (maxSource === eoCount && eoCount > 0) primaryTrigger = 'Event Orchestration'
+          else if (maxSource === userCount && userCount > 0) primaryTrigger = 'Manual'
+          else if (maxSource === wfCount && wfCount > 0) primaryTrigger = 'Incident Workflow'
+          else primaryTrigger = 'Unknown'
+        }
+
+        const ref: AutomationActionReference = {
+          actionId: resource.pdId,
+          actionName: resource.name,
+          actionType,
+          totalExecutions: invocationCount,
+          primaryTrigger,
+          lastRun: config.last_run || undefined,
+          stateCounts,
+          monthlyCounts,
+        }
+
+        if (invocationCount > 0) {
+          activeActions.push(ref)
+        } else {
+          dormantActions.push(ref)
+        }
+      }
+
+      // Sort active actions by execution count descending
+      activeActions.sort((a, b) => b.totalExecutions - a.totalExecutions)
+
+      // Count active actions by trigger type for the automationPatternCount
+      const orchestrationDrivenCount = activeActions.filter(a => a.primaryTrigger === 'Event Orchestration').length
+      const manualCount = activeActions.filter(a => a.primaryTrigger === 'Manual').length
+      const workflowDrivenCount = activeActions.filter(a => a.primaryTrigger === 'Incident Workflow').length
+
+      // Update automationPatternCount with active automation actions
+      automationPatternCount += activeActions.length
+
+      // Create grouped signal for active automation actions
+      if (activeActions.length > 0) {
+        const allRefs = [...activeActions]
+        // Build a summary description
+        const triggerBreakdown: string[] = []
+        if (orchestrationDrivenCount > 0) triggerBreakdown.push(`${orchestrationDrivenCount} orchestration-driven`)
+        if (manualCount > 0) triggerBreakdown.push(`${manualCount} manual`)
+        if (workflowDrivenCount > 0) triggerBreakdown.push(`${workflowDrivenCount} workflow-triggered`)
+
+        rawSignals.push({
+          type: 'automation_action',
+          confidence: 'high',
+          evidence: `${activeActions.length} active automation action${activeActions.length > 1 ? 's' : ''} with ${totalAutomationExecutions.toLocaleString()} total executions (${triggerBreakdown.join(', ')})`,
+          description: `PagerDuty Automation Actions (${activeActions.length} active)`,
+          automationActionReferences: allRefs,
+        })
+      }
+
+      // Create a separate signal for dormant/never-executed actions
+      if (dormantActions.length > 0) {
+        rawSignals.push({
+          type: 'automation_action',
+          confidence: 'low',
+          evidence: `${dormantActions.length} automation action${dormantActions.length > 1 ? 's' : ''} configured but never executed — may be demo/template actions`,
+          description: `Dormant Automation Actions (${dormantActions.length} unused)`,
+          automationActionReferences: dormantActions,
+        })
+      }
+    }
+  }
+
+  // ── Deduplicate: group by (type, serviceId, description) and add counts ──
+  // For workflow_integration and webhook_destination, group by description (vendor) to consolidate
+  const GROUPED_TYPES = new Set(['workflow_integration', 'webhook_destination', 'automation_action'])
+  const dedupKey = (s: typeof rawSignals[0]) =>
+    GROUPED_TYPES.has(s.type)
+      ? `${s.type}:${s.description}` // dedup by description (vendor/group name)
+      : `${s.type}:${s.serviceId || 'global'}`
+  const dedupMap = new Map<string, { signal: typeof rawSignals[0]; count: number; workflowRefs: WorkflowReference[]; webhookRefs: WebhookReference[]; automationRefs: AutomationActionReference[] }>()
 
   for (const signal of rawSignals) {
     const key = dedupKey(signal)
     const existing = dedupMap.get(key)
     if (existing) {
       existing.count++
+      if (signal.workflowReferences) existing.workflowRefs.push(...signal.workflowReferences)
+      if (signal.webhookReferences) existing.webhookRefs.push(...signal.webhookReferences)
+      if (signal.automationActionReferences) existing.automationRefs.push(...signal.automationActionReferences)
     } else {
-      dedupMap.set(key, { signal, count: 1 })
+      dedupMap.set(key, {
+        signal,
+        count: 1,
+        workflowRefs: signal.workflowReferences ? [...signal.workflowReferences] : [],
+        webhookRefs: signal.webhookReferences ? [...signal.webhookReferences] : [],
+        automationRefs: signal.automationActionReferences ? [...signal.automationActionReferences] : [],
+      })
     }
   }
 
-  const signals: ShadowSignal[] = Array.from(dedupMap.values()).map(({ signal, count }) => ({
-    ...signal,
-    count,
-    incidentIoReplacement: REPLACEMENT_MAP[signal.type],
-  }))
+  const signals: ShadowSignal[] = Array.from(dedupMap.values()).map(({ signal, count, workflowRefs, webhookRefs, automationRefs }) => {
+    const result: ShadowSignal = {
+      ...signal,
+      count,
+      incidentIoReplacement: REPLACEMENT_MAP[signal.type],
+    }
+    // Attach grouped references
+    if (workflowRefs.length > 0) {
+      result.workflowReferences = workflowRefs
+      result.evidence = `${workflowRefs.length} workflow${workflowRefs.length > 1 ? 's' : ''} integrating with this vendor`
+    }
+    if (webhookRefs.length > 0) {
+      result.webhookReferences = webhookRefs
+      result.evidence = `${webhookRefs.length} webhook subscription${webhookRefs.length > 1 ? 's' : ''} configured`
+    }
+    if (automationRefs.length > 0) {
+      result.automationActionReferences = automationRefs
+    }
+    return result
+  })
 
   // Sort: high confidence first, then by count descending
   signals.sort((a, b) => {
@@ -521,7 +765,7 @@ export function analyzeShadowStack(
   const parts: string[] = []
   if (apiConsumerCount > 0) parts.push(`${seenApiConsumers.size} custom API integration${seenApiConsumers.size > 1 ? 's' : ''}`)
   if (webhookDestinationCount > 0) parts.push(`${webhookDestinationCount} outbound webhook${webhookDestinationCount > 1 ? 's' : ''}`)
-  if (automationPatternCount > 0) parts.push(`${seenAutoAck.size + seenAutoResolve.size} automation pattern${seenAutoAck.size + seenAutoResolve.size > 1 ? 's' : ''}`)
+  if (automationPatternCount > 0) parts.push(`${automationPatternCount} automation pattern${automationPatternCount > 1 ? 's' : ''}`)
   if (eoRoutingLayerCount > 0) parts.push(`${eoRoutingLayerCount} Event Orchestration routing dependenc${eoRoutingLayerCount > 1 ? 'ies' : 'y'}`)
   if (seenEnrichment.size > 0) parts.push(`${seenEnrichment.size} enrichment pipeline${seenEnrichment.size > 1 ? 's' : ''}`)
 
@@ -534,7 +778,7 @@ export function analyzeShadowStack(
   if (logEntries.length === 0) {
     dataLimitations.push('Log entry data was unavailable — API automation patterns, auto-ack/resolve detection, and enrichment middleware could not be assessed.')
   }
-  if (!serviceToOrchestrations || serviceToOrchestrations.size === 0) {
+  if ((!allEoDetails || allEoDetails.length === 0) && (!serviceToOrchestrations || serviceToOrchestrations.size === 0)) {
     dataLimitations.push('Event Orchestration routing data not available — re-export domain config to detect dynamic routing layers.')
   }
   if (!accountResources || accountResources.length === 0) {
@@ -545,7 +789,7 @@ export function analyzeShadowStack(
     signals,
     apiConsumerCount: seenApiConsumers.size,
     webhookDestinationCount,
-    automationPatternCount: seenAutoAck.size + seenAutoResolve.size,
+    automationPatternCount,
     eoRoutingLayerCount,
     estimatedMaintenanceBurden,
     maintenanceNarrative,

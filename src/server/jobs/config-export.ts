@@ -204,10 +204,26 @@ export const configExport = inngest.createFunction(
         const enrichedWorkflows = list.map((wf, i) => {
           const detail = detailResults[i]
           if (detail.status === 'fulfilled' && detail.value) {
-            return { ...wf, steps: detail.value.steps, triggers: detail.value.triggers }
+            const d = detail.value
+            console.log(`[Config Export] Workflow "${wf.name}" (${wf.id}): ${d.steps?.length ?? 0} steps, ${d.triggers?.length ?? 0} triggers`)
+            if (d.steps && d.steps.length > 0) {
+              // Log action_ids for debugging integration detection
+              const actionIds = d.steps.map((s: any) => s.action_configuration?.action_id).filter(Boolean)
+              console.log(`[Config Export]   action_ids: ${actionIds.join(', ')}`)
+            }
+            return { ...wf, steps: d.steps, triggers: d.triggers }
+          }
+          if (detail.status === 'rejected') {
+            console.warn(`[Config Export] Workflow "${wf.name}" (${wf.id}) detail fetch rejected:`, (detail as PromiseRejectedResult).reason)
+          } else {
+            console.warn(`[Config Export] Workflow "${wf.name}" (${wf.id}) detail fetch returned null`)
           }
           return wf
         })
+
+        // Summary log
+        const withSteps = enrichedWorkflows.filter(wf => wf.steps && wf.steps.length > 0)
+        console.log(`[Config Export] Workflow enrichment: ${withSteps.length}/${enrichedWorkflows.length} workflows have steps`)
 
         jobProgress.updateProgress(domainId, {
           status: 'running',
@@ -545,13 +561,19 @@ export const configExport = inngest.createFunction(
           })
         }
         for (const wf of incidentWorkflows) {
+          const stepsArr = wf.steps || []
+          const triggersArr = (wf as any).triggers || []
           richConfigMap.set(wf.id, {
-            steps: wf.steps || [],
-            triggers: (wf as any).triggers || [],
+            steps: stepsArr,
+            triggers: triggersArr,
             team: wf.team,
             description: wf.description,
             _slackConnections: slackConnections.length > 0 ? slackConnections : undefined,
           })
+          if (stepsArr.length > 0) {
+            const actionIds = stepsArr.map((s: any) => s.action_configuration?.action_id).filter(Boolean)
+            console.log(`[Config Export] richConfigMap for "${wf.name}": ${stepsArr.length} steps, action_ids=[${actionIds.join(', ')}]`)
+          }
         }
         for (const eo of eventOrchestrations) {
           richConfigMap.set(eo.id, {

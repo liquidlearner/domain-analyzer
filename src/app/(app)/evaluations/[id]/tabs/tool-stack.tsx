@@ -11,6 +11,8 @@ import {
   FileCode,
   BarChart3,
   ArrowRight,
+  GitBranch,
+  Play,
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -32,6 +34,8 @@ const SIGNAL_ICONS: Record<string, React.ReactNode> = {
   terraform_consumer: <FileCode className="h-5 w-5 text-cyan-500" />,
   analytics_pipeline: <BarChart3 className="h-5 w-5 text-indigo-500" />,
   custom_extension: <Code className="h-5 w-5 text-pink-500" />,
+  workflow_integration: <GitBranch className="h-5 w-5 text-violet-500" />,
+  automation_action: <Play className="h-5 w-5 text-amber-500" />,
 };
 
 const SIGNAL_LABELS: Record<string, string> = {
@@ -45,6 +49,8 @@ const SIGNAL_LABELS: Record<string, string> = {
   terraform_consumer: "Terraform/IaC",
   analytics_pipeline: "Analytics Pipeline",
   custom_extension: "Custom Extension",
+  workflow_integration: "Workflow Integration",
+  automation_action: "Automation Action",
 };
 
 export default function ToolStackTab({ evaluation, analysisData }: ToolStackTabProps) {
@@ -167,56 +173,215 @@ export default function ToolStackTab({ evaluation, analysisData }: ToolStackTabP
         </Card>
       ) : (
         <div className="space-y-3">
-          {signals.map((signal: any, idx: number) => (
-            <Card key={idx} className="cursor-pointer hover:shadow-md transition-shadow">
-              <button
-                onClick={() => toggleSignal(idx)}
-                className="w-full text-left p-4 flex items-start justify-between"
-              >
-                <div className="flex items-start gap-4 flex-1">
-                  <div className="mt-1">{SIGNAL_ICONS[signal.type] || <Code className="h-5 w-5 text-zinc-400" />}</div>
-                  <div className="flex-1">
-                    <div className="flex items-center gap-2 mb-1 flex-wrap">
-                      <p className="font-semibold text-sm text-zinc-900">{signal.description}</p>
-                      <Badge className={getConfidenceBadgeColor(signal.confidence)}>
-                        {signal.confidence}
-                      </Badge>
-                      <Badge variant="secondary" className="text-xs">
-                        {SIGNAL_LABELS[signal.type] || signal.type}
-                      </Badge>
-                      {signal.count > 1 && (
-                        <Badge variant="outline" className="text-xs">{signal.count}x</Badge>
+          {signals.map((signal: any, idx: number) => {
+            const hasWorkflowRefs = signal.workflowReferences && signal.workflowReferences.length > 0;
+            const hasWebhookRefs = signal.webhookReferences && signal.webhookReferences.length > 0;
+            const hasAutomationRefs = signal.automationActionReferences && signal.automationActionReferences.length > 0;
+            const isGrouped = hasWorkflowRefs || hasWebhookRefs || hasAutomationRefs;
+            const refCount = hasWorkflowRefs
+              ? signal.workflowReferences.length
+              : hasWebhookRefs
+                ? signal.webhookReferences.length
+                : hasAutomationRefs
+                  ? signal.automationActionReferences.length
+                  : signal.count;
+
+            return (
+              <Card key={idx} className="cursor-pointer hover:shadow-md transition-shadow">
+                <button
+                  onClick={() => toggleSignal(idx)}
+                  className="w-full text-left p-4 flex items-start justify-between"
+                >
+                  <div className="flex items-start gap-4 flex-1">
+                    <div className="mt-1">{SIGNAL_ICONS[signal.type] || <Code className="h-5 w-5 text-zinc-400" />}</div>
+                    <div className="flex-1">
+                      <div className="flex items-center gap-2 mb-1 flex-wrap">
+                        <p className="font-semibold text-sm text-zinc-900">{signal.description}</p>
+                        <Badge className={getConfidenceBadgeColor(signal.confidence)}>
+                          {signal.confidence}
+                        </Badge>
+                        <Badge variant="secondary" className="text-xs">
+                          {SIGNAL_LABELS[signal.type] || signal.type}
+                        </Badge>
+                      </div>
+                      {/* Summary line for grouped signals */}
+                      {hasWorkflowRefs && (
+                        <p className="text-xs text-zinc-500">
+                          {signal.workflowReferences.length} workflow{signal.workflowReferences.length > 1 ? 's' : ''} referencing this integration
+                        </p>
+                      )}
+                      {hasWebhookRefs && (
+                        <p className="text-xs text-zinc-500">
+                          {signal.webhookReferences.length} webhook subscription{signal.webhookReferences.length > 1 ? 's' : ''} configured
+                        </p>
+                      )}
+                      {hasAutomationRefs && (() => {
+                        const totalExec = signal.automationActionReferences.reduce((sum: number, r: any) => sum + (r.totalExecutions || 0), 0);
+                        return (
+                          <p className="text-xs text-zinc-500">
+                            {signal.automationActionReferences.length} action{signal.automationActionReferences.length > 1 ? 's' : ''} · {totalExec.toLocaleString()} total execution{totalExec !== 1 ? 's' : ''}
+                          </p>
+                        );
+                      })()}
+                      {!isGrouped && (
+                        <p className="text-xs text-zinc-500">
+                          Service: {signal.serviceName || "Global"}
+                          {signal.count > 1 ? ` · ${signal.count} occurrences` : ''}
+                        </p>
                       )}
                     </div>
-                    <p className="text-xs text-zinc-500">
-                      Service: {signal.serviceName || "Global"}
-                    </p>
                   </div>
-                </div>
-                <ChevronDown className={`h-5 w-5 text-zinc-400 transition-transform flex-shrink-0 ${expandedSignals.has(idx) ? "rotate-180" : ""}`} />
-              </button>
+                  <div className="flex items-center gap-2 flex-shrink-0">
+                    {isGrouped && (
+                      <Badge variant="outline" className="text-xs font-mono">{refCount}</Badge>
+                    )}
+                    {!isGrouped && signal.count > 1 && (
+                      <Badge variant="outline" className="text-xs">{signal.count}x</Badge>
+                    )}
+                    <ChevronDown className={`h-5 w-5 text-zinc-400 transition-transform ${expandedSignals.has(idx) ? "rotate-180" : ""}`} />
+                  </div>
+                </button>
 
-              {expandedSignals.has(idx) && (
-                <div className="px-4 pb-4 border-t border-zinc-200 pt-4 space-y-3">
-                  <div>
-                    <p className="text-xs font-semibold text-zinc-600 mb-1">Evidence:</p>
-                    <p className="text-sm text-zinc-700 bg-zinc-50 rounded p-2">{signal.evidence}</p>
-                  </div>
-                  {signal.incidentIoReplacement && (
-                    <div className="bg-green-50 border border-green-200 rounded p-3">
-                      <div className="flex items-center gap-2 mb-2">
-                        <ArrowRight className="h-4 w-4 text-green-600" />
-                        <p className="text-xs font-semibold text-green-800">incident.io Replacement</p>
+                {expandedSignals.has(idx) && (
+                  <div className="px-4 pb-4 border-t border-zinc-200 pt-4 space-y-3">
+                    {/* Workflow references table */}
+                    {hasWorkflowRefs && (
+                      <div>
+                        <p className="text-xs font-semibold text-zinc-600 mb-2">Workflows</p>
+                        <div className="bg-zinc-50 rounded border border-zinc-200 divide-y divide-zinc-200">
+                          {signal.workflowReferences.map((ref: any, refIdx: number) => (
+                            <div key={refIdx} className="px-3 py-2 flex items-start justify-between gap-4">
+                              <div className="flex-1 min-w-0">
+                                <p className="text-sm font-medium text-zinc-900 truncate">{ref.workflowName}</p>
+                                <p className="text-xs text-zinc-500">
+                                  {ref.triggerType} · {ref.actions.join(', ')}
+                                </p>
+                              </div>
+                              <code className="text-[10px] text-zinc-400 font-mono flex-shrink-0 mt-0.5">{ref.workflowId}</code>
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                      <p className="text-sm font-medium text-green-900">{signal.incidentIoReplacement.feature}</p>
-                      <p className="text-xs text-green-800 mt-1">{signal.incidentIoReplacement.action}</p>
-                      <p className="text-xs text-green-700 mt-1">Effort: {signal.incidentIoReplacement.effort}</p>
-                    </div>
-                  )}
-                </div>
-              )}
-            </Card>
-          ))}
+                    )}
+
+                    {/* Webhook references table */}
+                    {hasWebhookRefs && (() => {
+                      const MAX_SHOWN = 10;
+                      const total = signal.webhookReferences.length;
+                      const shown = signal.webhookReferences.slice(0, MAX_SHOWN);
+                      const remaining = total - MAX_SHOWN;
+                      // Deduplicate URLs for a summary
+                      const uniqueUrls = [...new Set(signal.webhookReferences.map((r: any) => {
+                        try { return new URL(r.url).hostname; } catch { return r.url; }
+                      }))];
+                      return (
+                        <div>
+                          <p className="text-xs font-semibold text-zinc-600 mb-2">
+                            Webhook Subscriptions ({total} total{uniqueUrls.length === 1 ? ` · all to ${uniqueUrls[0]}` : ` · ${uniqueUrls.length} unique destinations`})
+                          </p>
+                          <div className="bg-zinc-50 rounded border border-zinc-200 divide-y divide-zinc-200">
+                            {shown.map((ref: any, refIdx: number) => (
+                              <div key={refIdx} className="px-3 py-2 flex items-start justify-between gap-4">
+                                <div className="flex-1 min-w-0">
+                                  <p className="text-sm font-medium text-zinc-900 truncate">{ref.name}</p>
+                                  <p className="text-xs text-zinc-400 truncate font-mono">{ref.url}</p>
+                                </div>
+                                <div className="flex items-center gap-2 flex-shrink-0">
+                                  <Badge variant={ref.active ? "default" : "secondary"} className="text-[10px]">
+                                    {ref.active ? 'active' : 'inactive'}
+                                  </Badge>
+                                </div>
+                              </div>
+                            ))}
+                            {remaining > 0 && (
+                              <div className="px-3 py-2 text-xs text-zinc-500 text-center">
+                                … and {remaining} more webhook subscription{remaining > 1 ? 's' : ''}
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Automation action references table */}
+                    {hasAutomationRefs && (() => {
+                      const refs = signal.automationActionReferences;
+                      const totalExec = refs.reduce((sum: number, r: any) => sum + (r.totalExecutions || 0), 0);
+                      const TRIGGER_COLORS: Record<string, string> = {
+                        'Event Orchestration': 'bg-blue-100 text-blue-800',
+                        'Manual': 'bg-zinc-100 text-zinc-800',
+                        'Incident Workflow': 'bg-violet-100 text-violet-800',
+                        'Never executed': 'bg-zinc-50 text-zinc-400',
+                      };
+                      return (
+                        <div>
+                          <p className="text-xs font-semibold text-zinc-600 mb-2">
+                            Automation Actions ({refs.length} total · {totalExec.toLocaleString()} executions)
+                          </p>
+                          <div className="bg-zinc-50 rounded border border-zinc-200 divide-y divide-zinc-200">
+                            {refs.map((ref: any, refIdx: number) => {
+                              const successCount = (ref.stateCounts?.completed || 0);
+                              const errorCount = (ref.stateCounts?.error || 0);
+                              const successRate = ref.totalExecutions > 0 ? Math.round((successCount / ref.totalExecutions) * 100) : 0;
+                              return (
+                                <div key={refIdx} className="px-3 py-2 flex items-start justify-between gap-4">
+                                  <div className="flex-1 min-w-0">
+                                    <p className="text-sm font-medium text-zinc-900 truncate">{ref.actionName}</p>
+                                    <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                                      <Badge className={TRIGGER_COLORS[ref.primaryTrigger] || 'bg-zinc-100 text-zinc-800'} variant="secondary">
+                                        {ref.primaryTrigger}
+                                      </Badge>
+                                      <span className="text-xs text-zinc-500">{ref.actionType}</span>
+                                      {ref.lastRun && (
+                                        <span className="text-xs text-zinc-400">Last: {ref.lastRun.slice(0, 10)}</span>
+                                      )}
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-shrink-0">
+                                    <div className="text-right">
+                                      <p className="text-sm font-bold text-zinc-900">{ref.totalExecutions.toLocaleString()}</p>
+                                      <p className="text-[10px] text-zinc-400">
+                                        {ref.totalExecutions > 0 ? (
+                                          <>
+                                            {successRate}% success
+                                            {errorCount > 0 && <span className="text-red-500"> · {errorCount} error{errorCount > 1 ? 's' : ''}</span>}
+                                          </>
+                                        ) : 'never run'}
+                                      </p>
+                                    </div>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {/* Standard evidence for non-grouped signals */}
+                    {!isGrouped && (
+                      <div>
+                        <p className="text-xs font-semibold text-zinc-600 mb-1">Evidence:</p>
+                        <p className="text-sm text-zinc-700 bg-zinc-50 rounded p-2">{signal.evidence}</p>
+                      </div>
+                    )}
+
+                    {signal.incidentIoReplacement && (
+                      <div className="bg-green-50 border border-green-200 rounded p-3">
+                        <div className="flex items-center gap-2 mb-2">
+                          <ArrowRight className="h-4 w-4 text-green-600" />
+                          <p className="text-xs font-semibold text-green-800">incident.io Replacement</p>
+                        </div>
+                        <p className="text-sm font-medium text-green-900">{signal.incidentIoReplacement.feature}</p>
+                        <p className="text-xs text-green-800 mt-1">{signal.incidentIoReplacement.action}</p>
+                        <p className="text-xs text-green-700 mt-1">Effort: {signal.incidentIoReplacement.effort}</p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </Card>
+            );
+          })}
         </div>
       )}
 
