@@ -16,6 +16,8 @@ import VolumeNoiseTab from "./tabs/volume-noise";
 import AlertSourcesTab from "./tabs/alert-sources";
 import ToolStackTab from "./tabs/tool-stack";
 import MigrationPlanTab from "./tabs/migration-plan";
+import { AdvisorPanel } from "@/components/features/ai-advisor/advisor-panel";
+import { AdvisorToggle } from "@/components/features/ai-advisor/advisor-toggle";
 
 interface ProgressData {
   status: string;
@@ -43,6 +45,8 @@ export default function EvaluationPage() {
   const cancelMutation = trpc.evaluation.cancel.useMutation();
   const retryMutation = trpc.evaluation.retry.useMutation();
   const [progressData, setProgressData] = useState<ProgressData | null>(null);
+  const [advisorOpen, setAdvisorOpen] = useState(false);
+  const { data: aiAvailability } = trpc.ai.isAvailable.useQuery();
 
   // Setup SSE subscription for progress
   useEffect(() => {
@@ -172,17 +176,22 @@ export default function EvaluationPage() {
         title="Evaluation Results"
         description={`${domainSubdomain}.pagerduty.com`}
         actions={
-          isRunning ? (
-            <Button
-              variant="destructive"
-              size="sm"
-              onClick={handleCancel}
-              disabled={cancelMutation.isPending}
-            >
-              <X className="mr-2 h-4 w-4" />
-              Cancel
-            </Button>
-          ) : null
+          <div className="flex items-center gap-2">
+            {isRunning && (
+              <Button
+                variant="destructive"
+                size="sm"
+                onClick={handleCancel}
+                disabled={cancelMutation.isPending}
+              >
+                <X className="mr-2 h-4 w-4" />
+                Cancel
+              </Button>
+            )}
+            {evaluation.status === "COMPLETED" && aiAvailability?.available && (
+              <AdvisorToggle onClick={() => setAdvisorOpen(true)} />
+            )}
+          </div>
         }
       />
 
@@ -294,6 +303,15 @@ export default function EvaluationPage() {
             <p className="text-sm text-zinc-600">This evaluation was cancelled.</p>
           </CardContent>
         </Card>
+      )}
+
+      {/* AI Advisor Panel */}
+      {evaluation.status === "COMPLETED" && aiAvailability?.available && (
+        <AdvisorPanel
+          evaluationId={evaluationId}
+          isOpen={advisorOpen}
+          onClose={() => setAdvisorOpen(false)}
+        />
       )}
     </div>
   );

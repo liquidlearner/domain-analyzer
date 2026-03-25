@@ -76,9 +76,10 @@ model User {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  customersCreated Customer[]
-  evaluations      Evaluation[]
-  auditLogs        AuditLog[]
+  customersCreated  Customer[]
+  evaluations       Evaluation[]
+  auditLogs         AuditLog[]
+  aiConversations   AiConversation[] @relation("aiConversations")
 
   @@map("users")
 }
@@ -177,6 +178,7 @@ model Evaluation {
   configSnapshot        ConfigSnapshot?        @relation(fields: [configSnapshotId], references: [id], onDelete: SetNull)
   incidentAnalyses      IncidentAnalysis[]
   migrationMappings     MigrationMapping[]
+  aiConversations       AiConversation[]
 
   @@index([domainId])
   @@index([status])
@@ -220,6 +222,23 @@ model MigrationMapping {
 
   @@index([evaluationId])
   @@map("migration_mappings")
+}
+
+model AiConversation {
+  id            String   @id @default(cuid())
+  evaluationId  String
+  createdById   String
+  title         String?
+  messagesJson  Bytes
+  tokenCount    Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  evaluation Evaluation @relation(fields: [evaluationId], references: [id], onDelete: Cascade)
+  createdBy  User       @relation("aiConversations", fields: [createdById], references: [id])
+
+  @@index([evaluationId])
+  @@map("ai_conversations")
 }
 
 model AuditLog {

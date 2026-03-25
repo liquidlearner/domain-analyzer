@@ -1,0 +1,23 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/page.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/overview.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/alert-sources.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/volume-noise.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/config-map.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/shadow-stack.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/migration-plan.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/report/page.tsx)",
+      "Bash(cat /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/report/layout.tsx)",
+      "Bash(xargs cat:*)",
+      "Bash(wc -l /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/alert-sources.tsx /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/tabs/shadow-stack.tsx /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/report/page.tsx)",
+      "Bash(head -300 /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/report/page.tsx)",
+      "Bash(ls -la /Users/christopherbell/Desktop/pd-migration-analyzer/src/app/\\\\\\(app\\\\\\)/evaluations/[id]/)",
+      "Bash(grep -E \"\\\\.\\(prisma|sql|ts\\)$\")",
+      "Bash(ls -la /Users/christopherbell/Desktop/pd-migration-analyzer/src/server/services/evaluation*)",
+      "Bash(wc -l /Users/christopherbell/Desktop/pd-migration-analyzer/src/server/services/analysis/*.ts)",
+      "Bash(npm install:*)"
+    ]
+  }
+}
