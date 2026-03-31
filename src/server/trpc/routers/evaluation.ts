@@ -9,8 +9,10 @@ import { decompressJson } from '@/lib/compression'
 const createEvaluationInput = z.object({
   domainId: z.string().cuid(),
   scopeType: z.enum(['TEAM', 'SERVICE']),
-  scopeIds: z.array(z.string()).min(1),
+  scopeIds: z.array(z.string()),
   timeRangeDays: z.enum(['1', '7', '30', '90', '365']).default('30'),
+  isFullDomain: z.boolean().optional().default(false),
+  configOnly: z.boolean().optional().default(false),
 })
 
 const evaluationIdInput = z.object({
@@ -28,7 +30,7 @@ export const evaluationRouter = router({
   create: seProcedure
     .input(createEvaluationInput)
     .mutation(async ({ ctx, input }) => {
-      const { domainId, scopeType, scopeIds, timeRangeDays } = input
+      const { domainId, scopeType, scopeIds, timeRangeDays, isFullDomain, configOnly } = input
 
       // Verify domain exists and user has access
       const domain = await prisma.pdDomain.findUnique({
@@ -45,14 +47,48 @@ export const evaluationRouter = router({
         })
       }
 
+      // For full domain or config-only analysis, resolve all service IDs from the latest snapshot
+      let resolvedScopeIds = scopeIds
+      if (isFullDomain || configOnly) {
+        const latestSnapshot = await prisma.configSnapshot.findFirst({
+          where: { domainId, status: 'COMPLETED' },
+          orderBy: { capturedAt: 'desc' },
+          select: { id: true },
+        })
+        if (!latestSnapshot) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'No config snapshot found. Run a config sync first.',
+          })
+        }
+        const allServices = await prisma.pdResource.findMany({
+          where: { snapshotId: latestSnapshot.id, pdType: 'SERVICE' },
+          select: { pdId: true },
+        })
+        if (allServices.length === 0) {
+          throw new TRPCError({
+            code: 'BAD_REQUEST',
+            message: 'No services found in config snapshot.',
+          })
+        }
+        resolvedScopeIds = allServices.map((s) => s.pdId)
+      } else if (resolvedScopeIds.length === 0) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Please select at least one team or service.',
+        })
+      }
+
       // Create evaluation with time range
       const evaluation = await prisma.evaluation.create({
         data: {
           domainId,
           createdById: ctx.user.id,
-          scopeType,
-          scopeIds,
+          scopeType: (isFullDomain || configOnly) ? 'SERVICE' : scopeType,
+          scopeIds: resolvedScopeIds,
           timeRangeDays: parseInt(timeRangeDays, 10),
+          isFullDomain,
+          configOnly,
           status: 'PENDING',
         },
       })
@@ -211,6 +247,193 @@ export const evaluationRouter = router({
           shadowSignals: analysis.shadowSignals,
         },
       }
+    }),
+
+  /**
+   * Get structured on-call config data (teams, schedules, EPs, services) from the
+   * config snapshot linked to this evaluation. Reads configJson at query time —
+   * no re-analysis required. Used to power the On-Call Structure report tab.
+   */
+  getOnCallStructure: protectedProcedure
+    .input(evaluationIdInput)
+    .query(async ({ ctx, input }) => {
+      const { id } = input
+
+      const evaluation = await prisma.evaluation.findUnique({
+        where: { id },
+        select: { configSnapshotId: true, createdById: true },
+      })
+
+      if (!evaluation?.configSnapshotId) return null
+
+      // Access control
+      const fullEval = await prisma.evaluation.findUnique({ where: { id }, select: { createdById: true } })
+      if (ctx.user.role !== 'ADMIN' && fullEval?.createdById !== ctx.user.id) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Access denied' })
+      }
+
+      // Load all structural resource types with configJson in one query
+      const resources = await prisma.pdResource.findMany({
+        where: {
+          snapshotId: evaluation.configSnapshotId,
+          pdType: { in: ['TEAM', 'USER', 'SCHEDULE', 'ESCALATION_POLICY', 'SERVICE'] as any[] },
+        },
+        select: { pdId: true, pdType: true, name: true, configJson: true, teamIds: true, dependencies: true },
+      })
+
+      // Parse all configJson
+      const parsed = resources.map((r) => ({
+        ...r,
+        config: decompressJson(r.configJson) as any,
+      }))
+
+      // Build lookup maps for target resolution
+      const userMap = new Map(parsed.filter((r) => r.pdType === 'USER').map((r) => [r.pdId, r]))
+      const scheduleMap = new Map(parsed.filter((r) => r.pdType === 'SCHEDULE').map((r) => [r.pdId, r]))
+      const epMap = new Map(parsed.filter((r) => r.pdType === 'ESCALATION_POLICY').map((r) => [r.pdId, r]))
+
+      // Shape teams with member list
+      const teams = parsed
+        .filter((r) => r.pdType === 'TEAM')
+        .map((r) => ({
+          id: r.pdId,
+          name: r.name,
+          members: (r.config.members || []).map((m: any) => ({
+            name: m.user?.name || 'Unknown',
+            email: m.user?.email || '',
+            role: m.role || 'responder',
+          })),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+
+      // Shape escalation policies with resolved target names
+      const escalationPolicies = parsed
+        .filter((r) => r.pdType === 'ESCALATION_POLICY')
+        .map((r) => ({
+          id: r.pdId,
+          name: r.name,
+          teamIds: r.teamIds,
+          numLoops: r.config.num_loops ?? 0,
+          rules: (r.config.escalation_rules || []).map((rule: any, idx: number) => ({
+            ruleNumber: idx + 1,
+            escalationDelayMinutes: rule.escalation_delay_in_minutes ?? 0,
+            targets: (rule.targets || []).map((target: any) => {
+              const isSchedule = (target.type || '').includes('schedule')
+              const resolvedName = isSchedule
+                ? (scheduleMap.get(target.id)?.name ?? target.summary ?? target.id)
+                : (userMap.get(target.id)?.name ?? target.summary ?? target.id)
+              return { id: target.id, type: target.type, name: resolvedName, isSchedule }
+            }),
+          })),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+
+      // Shape schedules with layers
+      const schedules = parsed
+        .filter((r) => r.pdType === 'SCHEDULE')
+        .map((r) => ({
+          id: r.pdId,
+          name: r.name,
+          teamIds: r.teamIds,
+          timeZone: r.config.time_zone || '',
+          layers: (r.config.schedule_layers || []).map((layer: any) => ({
+            name: layer.name || '',
+            rotationTurnLengthSeconds: layer.rotation_turn_length_seconds ?? 0,
+            users: (layer.users || []).map((u: any) => {
+              const userId = u.user?.id || u.id
+              return userMap.get(userId)?.name ?? u.user?.summary ?? userId
+            }),
+            restrictions: (layer.restrictions || []).map((res: any) => ({
+              type: res.type,
+              durationSeconds: res.duration_seconds,
+              startDayOfWeek: res.start_day_of_week,
+              startTimeOfDay: res.start_time_of_day,
+            })),
+          })),
+        }))
+        .sort((a, b) => a.name.localeCompare(b.name))
+
+      // Shape services summary
+      const services = parsed
+        .filter((r) => r.pdType === 'SERVICE')
+        .map((r) => {
+          const epId = r.config.escalation_policy?.id
+          const epName = epId ? (epMap.get(epId)?.name ?? r.config.escalation_policy?.summary ?? '') : ''
+          return {
+            id: r.pdId,
+            name: r.name,
+            teamIds: r.teamIds,
+            status: r.config.status || 'active',
+            escalationPolicyName: epName,
+            integrationCount: (r.config.integrations || []).length,
+            alertGroupingType: r.config.alert_grouping_parameters?.type ?? null,
+            autoResolveTimeout: r.config.auto_resolve_timeout ?? null,
+            acknowledgementTimeout: r.config.acknowledgement_timeout ?? null,
+            hasDependencies: (r.config._dependsOn?.length ?? 0) > 0 || (r.config._dependedOnBy?.length ?? 0) > 0,
+            dependsOn: r.config._dependsOn ?? [],
+            dependedOnBy: r.config._dependedOnBy ?? [],
+          }
+        })
+        .sort((a, b) => a.name.localeCompare(b.name))
+
+      return { teams, escalationPolicies, schedules, services }
+    }),
+
+  /**
+   * Get entitlement data for an evaluation: account abilities + user license breakdown.
+   * Reads the ACCOUNT_INFO and USER resources from the linked config snapshot.
+   */
+  getEntitlements: protectedProcedure
+    .input(evaluationIdInput)
+    .query(async ({ ctx, input }) => {
+      const { id } = input
+
+      const evaluation = await prisma.evaluation.findUnique({
+        where: { id },
+        select: { configSnapshotId: true, createdById: true },
+      })
+
+      if (!evaluation?.configSnapshotId) return null
+
+      // Access control
+      if (ctx.user.role !== 'ADMIN' && evaluation.createdById !== ctx.user.id) {
+        throw new TRPCError({ code: 'FORBIDDEN', message: 'Access denied' })
+      }
+
+      // Load ACCOUNT_INFO and USER resources from the snapshot
+      const resources = await prisma.pdResource.findMany({
+        where: {
+          snapshotId: evaluation.configSnapshotId,
+          pdType: { in: ['ACCOUNT_INFO', 'USER'] as any[] },
+        },
+        select: { pdId: true, pdType: true, configJson: true },
+      })
+
+      // Extract abilities from ACCOUNT_INFO resource
+      const accountInfoResource = resources.find((r) => r.pdType === 'ACCOUNT_INFO')
+      let abilities: string[] = []
+      if (accountInfoResource) {
+        try {
+          const parsed = decompressJson(accountInfoResource.configJson) as any
+          abilities = parsed.abilities || []
+        } catch {
+          // ignore parse errors
+        }
+      }
+
+      // Count users by role type
+      const usersByRole: Record<string, number> = {}
+      for (const r of resources.filter((r) => r.pdType === 'USER')) {
+        try {
+          const parsed = decompressJson(r.configJson) as any
+          const role = parsed.role || 'user'
+          usersByRole[role] = (usersByRole[role] || 0) + 1
+        } catch {
+          usersByRole['user'] = (usersByRole['user'] || 0) + 1
+        }
+      }
+
+      return { abilities, usersByRole, hasAccountInfo: !!accountInfoResource }
     }),
 
   /**

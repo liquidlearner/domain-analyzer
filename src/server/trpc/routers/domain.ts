@@ -506,7 +506,7 @@ export const domainRouter = router({
       // analysis (Module 2) when the user selects scope + time window.
       const [
         services,
-        teams,
+        rawTeams,
         schedules,
         escalationPolicies,
         users,
@@ -519,6 +519,7 @@ export const domainRouter = router({
         slackConnections,
         automationActions,
         automationRunners,
+        serviceDependencies,
       ] = await Promise.all([
         pdClient.listServices(),
         pdClient.listTeams(),
@@ -534,7 +535,37 @@ export const domainRouter = router({
         pdClient.getSlackConnections(),
         pdClient.listAutomationActions(),
         pdClient.listAutomationRunners(),
+        pdClient.listServiceDependencies(),
       ]);
+
+      // Enrich teams with member roles (batched, 10 concurrent)
+      console.log(`[Sync Config] Fetching members for ${rawTeams.length} teams...`);
+      const teams = await pdClient.enrichTeamsWithMembers(rawTeams);
+
+      // Build technical service dependency map for folding into service records
+      const techDepMap = new Map<string, { dependsOn: string[]; dependedOnBy: string[] }>();
+      for (const dep of serviceDependencies) {
+        const depId = dep.dependent_service.id;
+        const supId = dep.supporting_service.id;
+        if (!techDepMap.has(depId)) techDepMap.set(depId, { dependsOn: [], dependedOnBy: [] });
+        if (!techDepMap.has(supId)) techDepMap.set(supId, { dependsOn: [], dependedOnBy: [] });
+        techDepMap.get(depId)!.dependsOn.push(supId);
+        techDepMap.get(supId)!.dependedOnBy.push(depId);
+      }
+
+      // Enrich business services with their supporting technical services (batched)
+      console.log(`[Sync Config] Fetching dependencies for ${businessServices.length} business services...`);
+      const bsDepsResults = await Promise.allSettled(
+        businessServices.map((bs) => pdClient.getBusinessServiceDependencies(bs.id))
+      );
+      const bsDepsMap = new Map<string, string[]>();
+      businessServices.forEach((bs, i) => {
+        const r = bsDepsResults[i];
+        const supportingIds = r.status === "fulfilled"
+          ? r.value.map((d) => d.supporting_service.id)
+          : [];
+        bsDepsMap.set(bs.id, supportingIds);
+      });
 
       // Fetch full detail (steps + triggers) for each workflow
       // The list endpoint does NOT return steps/triggers — must fetch individually
@@ -624,13 +655,18 @@ export const domainRouter = router({
       const resources: Record<string, ResourceEntry> = {};
 
       for (const s of services) {
+        const techDeps = techDepMap.get(s.id);
         resources[s.id] = {
           pdId: s.id,
           type: "SERVICE",
           name: s.name || "",
           teamIds: s.teams?.map((t) => t.id) || [],
           dependencies: s.escalation_policy?.id ? [s.escalation_policy.id] : [],
-          configJson: s,
+          configJson: {
+            ...s,
+            _dependsOn: techDeps?.dependsOn ?? [],
+            _dependedOnBy: techDeps?.dependedOnBy ?? [],
+          },
         };
       }
       for (const t of teams) {
@@ -686,13 +722,17 @@ export const domainRouter = router({
         };
       }
       for (const bs of businessServices) {
+        const supportingIds = bsDepsMap.get(bs.id) ?? [];
         resources[bs.id] = {
           pdId: bs.id,
           type: "BUSINESS_SERVICE",
           name: bs.name || "",
           teamIds: [],
-          dependencies: [],
-          configJson: bs,
+          dependencies: supportingIds,
+          configJson: {
+            ...bs,
+            _supportingServices: supportingIds,
+          },
         };
       }
       for (const rs of rulesets) {

@@ -24,6 +24,7 @@ enum DomainStatus {
 }
 
 enum PdResourceType {
+  ACCOUNT_INFO
   AUTOMATION_ACTION
   AUTOMATION_RUNNER
   BUSINESS_SERVICE
@@ -168,6 +169,8 @@ model Evaluation {
   scopeType         ScopeType
   scopeIds          String[]
   timeRangeDays     Int                @default(30)
+  isFullDomain      Boolean            @default(false)
+  configOnly        Boolean            @default(false)
   startedAt         DateTime?
   completedAt       DateTime?
   createdAt         DateTime           @default(now())

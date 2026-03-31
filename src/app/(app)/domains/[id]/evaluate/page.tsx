@@ -46,7 +46,10 @@ export default function EvaluatePage() {
 
   const createMutation = trpc.evaluation.create.useMutation();
 
-  const [scopeType, setScopeType] = useState<"TEAM" | "SERVICE">("SERVICE");
+  const [mode, setMode] = useState<"TEAM" | "SERVICE" | "FULL" | "CONFIG">("SERVICE");
+  const scopeType: "TEAM" | "SERVICE" = mode === "TEAM" ? "TEAM" : "SERVICE";
+  const isFullDomain = mode === "FULL";
+  const isConfigOnly = mode === "CONFIG";
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [timeRange, setTimeRange] = useState<"1" | "7" | "30" | "90" | "365">("90");
   const [searchQuery, setSearchQuery] = useState("");
@@ -122,7 +125,7 @@ export default function EvaluatePage() {
   };
 
   const handleStartAnalysis = async () => {
-    if (selectedIds.size === 0) {
+    if (!isFullDomain && !isConfigOnly && selectedIds.size === 0) {
       toast({
         title: "Error",
         description: `Please select at least one ${scopeType === "TEAM" ? "team" : "service"}`,
@@ -135,8 +138,10 @@ export default function EvaluatePage() {
       const evaluation = await createMutation.mutateAsync({
         domainId,
         scopeType,
-        scopeIds: Array.from(selectedIds),
+        scopeIds: (isFullDomain || isConfigOnly) ? [] : Array.from(selectedIds),
         timeRangeDays: timeRange,
+        isFullDomain,
+        configOnly: isConfigOnly,
       });
 
       toast({
@@ -178,34 +183,51 @@ export default function EvaluatePage() {
       {/* Scope Type Selection */}
       <div>
         <Label className="text-base font-semibold mb-3 block">Scope Type</Label>
-        <div className="grid grid-cols-2 gap-4">
-          {(["TEAM", "SERVICE"] as const).map((type) => (
+        <div className="grid grid-cols-4 gap-4">
+          {([
+            {
+              value: "CONFIG",
+              label: "Config Snapshot",
+              description: "Instant report from config data only. Uses analytics API for volume stats — no incident fetching.",
+            },
+            {
+              value: "FULL",
+              label: "Full Domain",
+              description: `All ${services.length} services — samples incidents per service + analytics API for volume`,
+            },
+            {
+              value: "SERVICE",
+              label: "By Service",
+              description: "Select specific services to analyze in depth",
+            },
+            {
+              value: "TEAM",
+              label: "By Team",
+              description: "Analyze by team assignment",
+            },
+          ] as const).map(({ value, label, description }) => (
             <button
-              key={type}
+              key={value}
               onClick={() => {
-                setScopeType(type);
+                setMode(value as "TEAM" | "SERVICE" | "FULL" | "CONFIG");
                 setSelectedIds(new Set());
                 setSearchQuery("");
               }}
               className={`p-4 rounded-lg border-2 text-left transition-colors ${
-                scopeType === type
+                mode === value
                   ? "border-primary bg-primary-light"
                   : "border-zinc-200 bg-white hover:border-zinc-300"
               }`}
             >
               <div className="flex items-center gap-2">
-                {scopeType === type ? (
+                {mode === value ? (
                   <CheckCircle2 className="h-5 w-5 text-primary" />
                 ) : (
                   <Circle className="h-5 w-5 text-zinc-400" />
                 )}
                 <div>
-                  <p className="font-semibold text-sm">By {type === "TEAM" ? "Team" : "Service"}</p>
-                  <p className="text-xs text-zinc-500 mt-1">
-                    {type === "TEAM"
-                      ? "Analyze by team assignment"
-                      : "Analyze by individual service"}
-                  </p>
+                  <p className="font-semibold text-sm">{label}</p>
+                  <p className="text-xs text-zinc-500 mt-1">{description}</p>
                 </div>
               </div>
             </button>
@@ -213,8 +235,33 @@ export default function EvaluatePage() {
         </div>
       </div>
 
+      {/* Selection List — hidden for Full Domain mode */}
+      {isConfigOnly && (
+        <Card className="bg-primary-light border-primary-muted">
+          <CardContent className="pt-4 pb-4">
+            <p className="text-sm text-zinc-700">
+              <span className="font-semibold">Config Snapshot Report</span> — all {services.length} services analyzed from config data only.
+              Uses the PD Analytics API for aggregate volume metrics (no individual incident fetching).
+              On-Call Structure, Config Map, Migration Plan, and Entitlements are fully available.
+              Noise analysis and alert source identification require incident data and will show as unavailable.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
+      {isFullDomain && (
+        <Card className="bg-primary-light border-primary-muted">
+          <CardContent className="pt-4 pb-4">
+            <p className="text-sm text-zinc-700">
+              <span className="font-semibold">Full Domain Quick Analysis</span> — all {services.length} services will be analyzed automatically.
+              Samples up to 15 incidents per service for qualitative analysis (noise, sources, shadow stack), plus aggregate volume metrics via the PD Analytics API where available. On-Call Structure, Config Map, and Migration Plan are fully config-driven.
+            </p>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Selection List */}
-      <Card>
+      {!isFullDomain && !isConfigOnly && <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
             <div>
@@ -321,7 +368,7 @@ export default function EvaluatePage() {
             )}
           </div>
         </CardContent>
-      </Card>
+      </Card>}
 
       {/* Time Range Selection */}
       <Card>
@@ -355,11 +402,15 @@ export default function EvaluatePage() {
             <p className="text-sm">
               <span className="font-semibold">Analyzing:</span>{" "}
               <span className="text-zinc-600">
-                {selectedIds.size} {scopeType === "TEAM" ? "teams" : "services"} over{" "}
-                {TIME_RANGE_OPTIONS.find((opt) => opt.value === timeRange)?.label}
+                {isConfigOnly
+                  ? `All ${services.length} services (config snapshot)`
+                  : isFullDomain
+                  ? `All ${services.length} services (full domain)`
+                  : `${selectedIds.size} ${scopeType === "TEAM" ? "teams" : "services"}`}{" "}
+                over {TIME_RANGE_OPTIONS.find((opt) => opt.value === timeRange)?.label}
               </span>
             </p>
-            {selectedIds.size > 0 && (
+            {!isFullDomain && selectedIds.size > 0 && (
               <div className="flex flex-wrap gap-2 mt-3">
                 {Array.from(selectedIds).map((id) => {
                   const option = scopeOptions.find((opt) => opt.id === id);
@@ -386,7 +437,7 @@ export default function EvaluatePage() {
         <Button
           size="lg"
           onClick={handleStartAnalysis}
-          disabled={selectedIds.size === 0 || createMutation.isPending}
+          disabled={(!isFullDomain && !isConfigOnly && selectedIds.size === 0) || createMutation.isPending}
         >
           {createMutation.isPending ? "Starting..." : "Start Analysis"}
         </Button>

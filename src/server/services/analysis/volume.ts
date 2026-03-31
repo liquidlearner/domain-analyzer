@@ -1,4 +1,4 @@
-import type { PDIncident, PDService } from '@/server/services/pd/types'
+import type { PDIncident, PDService, PDAnalyticsServiceMetric } from '@/server/services/pd/types'
 
 export interface VolumeAnalysis {
   totalIncidents: number
@@ -10,19 +10,21 @@ export interface VolumeAnalysis {
   heatmapData: { day: number; hour: number; count: number }[] // for day-of-week × hour heatmap
   severityDistribution: { severity: string; count: number }[]
   topNoisiest: { serviceId: string; serviceName: string; count: number }[] // top 10
+  analyticsAvailable: boolean
 }
 
 export function analyzeVolume(
   incidents: any[],
-  services: any[]
+  services: any[],
+  analyticsMetrics: PDAnalyticsServiceMetric[] = []
 ): VolumeAnalysis {
   const serviceMap = new Map<string, string>()
   services.forEach((svc: any) => {
     serviceMap.set(svc.id, svc.name || 'Unknown')
   })
 
-  // Count by service
-  const incidentsByService = new Map<string, number>()
+  // Time-pattern aggregations always come from incident timestamps
+  // (analytics API doesn't provide per-hour/per-day-of-week breakdowns)
   const incidentsByDay = new Map<string, number>()
   const incidentsByHour = new Map<number, number>()
   const incidentsByDayOfWeek = new Map<number, number>()
@@ -30,18 +32,11 @@ export function analyzeVolume(
   const severityDistribution = new Map<string, number>()
 
   incidents.forEach((incident: any) => {
-    const serviceId = incident.service?.id || 'unknown'
     const severity = incident.urgency || 'unknown'
     const createdAt = incident.created_at ? new Date(incident.created_at) : null
 
-    // Service count
-    incidentsByService.set(serviceId, (incidentsByService.get(serviceId) ?? 0) + 1)
-
     // Severity distribution
-    severityDistribution.set(
-      severity,
-      (severityDistribution.get(severity) ?? 0) + 1
-    )
+    severityDistribution.set(severity, (severityDistribution.get(severity) ?? 0) + 1)
 
     if (createdAt && !isNaN(createdAt.getTime())) {
       // Day aggregation (YYYY-MM-DD)
@@ -54,10 +49,7 @@ export function analyzeVolume(
 
       // Day of week (0=Sun, 6=Sat)
       const dayOfWeek = createdAt.getUTCDay()
-      incidentsByDayOfWeek.set(
-        dayOfWeek,
-        (incidentsByDayOfWeek.get(dayOfWeek) ?? 0) + 1
-      )
+      incidentsByDayOfWeek.set(dayOfWeek, (incidentsByDayOfWeek.get(dayOfWeek) ?? 0) + 1)
 
       // Heatmap: day of week × hour
       const heatmapKey = `${dayOfWeek}:${hour}`
@@ -65,14 +57,38 @@ export function analyzeVolume(
     }
   })
 
-  // Convert maps to arrays and sort
-  const incidentsByServiceArray = Array.from(incidentsByService.entries())
-    .map(([serviceId, count]) => ({
-      serviceId,
-      serviceName: serviceMap.get(serviceId) || 'Unknown',
-      count,
-    }))
-    .sort((a, b) => b.count - a.count)
+  // ── Per-service counts: prefer analytics API (accurate) over incident sample ──
+  let incidentsByServiceArray: { serviceId: string; serviceName: string; count: number }[]
+  let totalIncidents: number
+  const analyticsAvailable = analyticsMetrics.length > 0
+
+  if (analyticsAvailable) {
+    // Use accurate aggregate counts from analytics API
+    incidentsByServiceArray = analyticsMetrics
+      .map((m) => ({
+        serviceId: m.service_id,
+        serviceName: m.service_name || serviceMap.get(m.service_id) || 'Unknown',
+        count: m.total_incident_count,
+      }))
+      .filter((s) => s.count > 0)
+      .sort((a, b) => b.count - a.count)
+    totalIncidents = analyticsMetrics.reduce((sum, m) => sum + m.total_incident_count, 0)
+  } else {
+    // Fall back to counting from the incident sample
+    const incidentsByService = new Map<string, number>()
+    incidents.forEach((incident: any) => {
+      const serviceId = incident.service?.id || 'unknown'
+      incidentsByService.set(serviceId, (incidentsByService.get(serviceId) ?? 0) + 1)
+    })
+    incidentsByServiceArray = Array.from(incidentsByService.entries())
+      .map(([serviceId, count]) => ({
+        serviceId,
+        serviceName: serviceMap.get(serviceId) || 'Unknown',
+        count,
+      }))
+      .sort((a, b) => b.count - a.count)
+    totalIncidents = incidents.length
+  }
 
   const topNoisiest = incidentsByServiceArray.slice(0, 10)
 
@@ -95,13 +111,13 @@ export function analyzeVolume(
     })
     .sort((a, b) => (a.day - b.day) * 24 + (a.hour - b.hour))
 
-  const severityDistributionArray = Array.from(
-    severityDistribution.entries()
-  ).map(([severity, count]) => ({ severity, count }))
+  const severityDistributionArray = Array.from(severityDistribution.entries()).map(
+    ([severity, count]) => ({ severity, count })
+  )
 
   return {
-    totalIncidents: incidents.length,
-    totalAlerts: incidents.length, // Assuming 1:1 for now; adjust if different
+    totalIncidents,
+    totalAlerts: totalIncidents, // 1:1 assumption
     incidentsByService: incidentsByServiceArray,
     incidentsByDay: incidentsByDayArray,
     incidentsByHour: incidentsByHourArray,
@@ -109,5 +125,6 @@ export function analyzeVolume(
     heatmapData: heatmapArray,
     severityDistribution: severityDistributionArray,
     topNoisiest,
+    analyticsAvailable,
   }
 }

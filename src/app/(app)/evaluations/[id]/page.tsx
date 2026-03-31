@@ -16,6 +16,8 @@ import VolumeNoiseTab from "./tabs/volume-noise";
 import AlertSourcesTab from "./tabs/alert-sources";
 import ToolStackTab from "./tabs/tool-stack";
 import MigrationPlanTab from "./tabs/migration-plan";
+import OnCallStructureTab from "./tabs/on-call-structure";
+import EntitlementsTab from "./tabs/entitlements";
 import { AdvisorPanel } from "@/components/features/ai-advisor/advisor-panel";
 import { AdvisorToggle } from "@/components/features/ai-advisor/advisor-toggle";
 
@@ -234,13 +236,15 @@ export default function EvaluationPage() {
       {/* Completed State - Tabbed Interface */}
       {evaluation.status === "COMPLETED" && (
         <Tabs defaultValue="overview" className="w-full">
-          <TabsList className="grid w-full grid-cols-6">
+          <TabsList className="grid w-full grid-cols-8">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="config-map">Config Map</TabsTrigger>
+            <TabsTrigger value="on-call">On-Call Structure</TabsTrigger>
             <TabsTrigger value="volume-noise">Volume & Noise</TabsTrigger>
             <TabsTrigger value="sources">Alert Sources</TabsTrigger>
             <TabsTrigger value="tool-stack">Tool Stack</TabsTrigger>
             <TabsTrigger value="migration">Migration Plan</TabsTrigger>
+            <TabsTrigger value="entitlements">Entitlements</TabsTrigger>
           </TabsList>
 
           <TabsContent value="overview">
@@ -249,6 +253,10 @@ export default function EvaluationPage() {
 
           <TabsContent value="config-map">
             <ConfigMapTab evaluation={evaluation} />
+          </TabsContent>
+
+          <TabsContent value="on-call">
+            <OnCallStructureTab evaluation={evaluation} />
           </TabsContent>
 
           <TabsContent value="volume-noise">
@@ -265,6 +273,10 @@ export default function EvaluationPage() {
 
           <TabsContent value="migration">
             <MigrationPlanTab evaluation={evaluation} analysisData={analysisData} />
+          </TabsContent>
+
+          <TabsContent value="entitlements">
+            <EntitlementsTab evaluation={evaluation} />
           </TabsContent>
         </Tabs>
       )}

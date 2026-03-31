@@ -1,14 +1,17 @@
 import type {
   PDService,
   PDTeam,
+  PDTeamMember,
   PDSchedule,
   PDEscalationPolicy,
   PDUser,
   PDBusinessService,
+  PDServiceDependency,
   PDIncident,
   PDIntegration,
   PDLogEntry,
   PDAnalyticsIncident,
+  PDAnalyticsServiceMetric,
   PDRuleset,
   PDEventOrchestration,
   PDExtension,
@@ -20,6 +23,7 @@ import type {
   PDAutomationAction,
   PDAutomationRunner,
   PDAutomationInvocation,
+  PDChangeEvent,
 } from "./types";
 
 interface RateLimitState {
@@ -56,10 +60,7 @@ export class PagerDutyClient {
     error?: string;
   }> {
     try {
-      const response = await this.request<{ abilities: string[] }>(
-        "GET",
-        "/abilities"
-      );
+      await this.request<{ abilities: string[] }>("GET", "/abilities");
       return {
         valid: true,
         accountName: this.subdomain,
@@ -75,18 +76,44 @@ export class PagerDutyClient {
   }
 
   /**
+   * Fetch the account's enabled abilities (feature/plan flags).
+   * Returns empty array if the endpoint is unavailable or the token lacks access.
+   * Key abilities: event_intelligence, aiops, automation_actions, incident_workflows,
+   * preview_intelligent_alert_grouping, preview_machine_learning_early_access
+   */
+  async getAccountAbilities(): Promise<string[]> {
+    try {
+      const response = await this.request<{ abilities: string[] }>(
+        "GET",
+        "/abilities"
+      );
+      return response.abilities || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
    * List all services with optional team filter
    */
   async listServices(params?: { teamIds?: string[] }): Promise<PDService[]> {
-    const requestParams: Record<string, any> = {
-      include: ["integrations"],
-    };
-
+    const baseParams: Record<string, any> = {};
     if (params?.teamIds && params.teamIds.length > 0) {
-      requestParams.team_ids = params.teamIds;
+      baseParams.team_ids = params.teamIds;
     }
 
-    return this.paginateAll<PDService>("/services", "services", requestParams);
+    try {
+      // alert_grouping_parameters requires Event Intelligence / AIOps — may 500 on basic plans
+      return await this.paginateAll<PDService>("/services", "services", {
+        ...baseParams,
+        include: ["integrations", "alert_grouping_parameters"],
+      });
+    } catch {
+      return this.paginateAll<PDService>("/services", "services", {
+        ...baseParams,
+        include: ["integrations"],
+      });
+    }
   }
 
   /**
@@ -97,9 +124,50 @@ export class PagerDutyClient {
   }
 
   /**
+   * Get members (with roles) for a single team.
+   * The list teams endpoint does not include members.
+   */
+  async getTeamMembers(teamId: string): Promise<PDTeamMember[]> {
+    try {
+      return await this.paginateAll<PDTeamMember>(
+        `/teams/${teamId}/members`,
+        "members"
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Enrich a list of teams with their members, batched to avoid rate limits.
+   * Fetches up to maxConcurrent teams at a time.
+   */
+  async enrichTeamsWithMembers(
+    teams: PDTeam[],
+    maxConcurrent = 10
+  ): Promise<PDTeam[]> {
+    const enriched: PDTeam[] = [];
+    for (let i = 0; i < teams.length; i += maxConcurrent) {
+      const chunk = teams.slice(i, i + maxConcurrent);
+      const results = await Promise.allSettled(
+        chunk.map((t) => this.getTeamMembers(t.id))
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        const r = results[j];
+        enriched.push({
+          ...chunk[j],
+          members: r.status === "fulfilled" ? r.value : [],
+        });
+      }
+    }
+    return enriched;
+  }
+
+  /**
    * List all schedules
    */
   async listSchedules(): Promise<PDSchedule[]> {
+    // schedule_layers are returned in the default response body — no include param needed
     return this.paginateAll<PDSchedule>("/schedules", "schedules");
   }
 
@@ -107,39 +175,127 @@ export class PagerDutyClient {
    * List all escalation policies
    */
   async listEscalationPolicies(): Promise<PDEscalationPolicy[]> {
-    return this.paginateAll<PDEscalationPolicy>(
-      "/escalation_policies",
-      "escalation_policies"
-    );
+    try {
+      return await this.paginateAll<PDEscalationPolicy>(
+        "/escalation_policies",
+        "escalation_policies"
+      );
+    } catch {
+      return [];
+    }
   }
 
   /**
    * List all users
    */
   async listUsers(): Promise<PDUser[]> {
-    return this.paginateAll<PDUser>("/users", "users");
+    // NOTE: user notification rules and contact methods are not fetched here —
+    // per-user API calls are prohibitive at scale (1000s of users).
+    try {
+      return await this.paginateAll<PDUser>("/users", "users");
+    } catch {
+      return [];
+    }
   }
 
   /**
    * List all business services
    */
   async listBusinessServices(): Promise<PDBusinessService[]> {
-    return this.paginateAll<PDBusinessService>(
-      "/business_services",
-      "business_services"
-    );
+    try {
+      return await this.paginateAll<PDBusinessService>(
+        "/business_services",
+        "business_services"
+      );
+    } catch {
+      // Business services may not be available on all plan tiers
+      return [];
+    }
   }
 
   /**
-   * List incidents with optional filters
+   * List all technical service-to-service dependency relationships.
+   * Returns the full graph in a single paginated call.
+   */
+  async listServiceDependencies(): Promise<PDServiceDependency[]> {
+    try {
+      return await this.paginateAll<PDServiceDependency>(
+        "/service_dependencies/technical_services",
+        "relationships"
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get the technical services that support a given business service.
+   */
+  async getBusinessServiceDependencies(
+    businessServiceId: string
+  ): Promise<PDServiceDependency[]> {
+    try {
+      const response = await this.request<{
+        relationships: PDServiceDependency[];
+      }>("GET", `/business_services/${businessServiceId}/service_dependencies`);
+      return response.relationships || [];
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * List incidents with optional filters.
+   *
+   * maxIncidentsPerService: when set, each per-service-chunk is capped at
+   *   chunkSize * maxIncidentsPerService entries. This prevents noisy services
+   *   from bloating the fetch far beyond what the caller will ultimately use.
+   *   Falls back to chunkSize * 60 when not specified (backwards-compatible).
    */
   async listIncidents(params: {
     teamIds?: string[];
     serviceIds?: string[];
     since: string;
     until: string;
+    maxIncidents?: number;
+    maxIncidentsPerService?: number;
     onPage?: (fetched: number, hasMore: boolean) => void;
   }): Promise<PDIncident[]> {
+    // When there are many service IDs the query string exceeds URL length limits (HTTP 414).
+    // Chunk service IDs into groups of 50 and merge results.
+    const MAX_SERVICE_IDS_PER_REQUEST = 50;
+    if (params.serviceIds && params.serviceIds.length > MAX_SERVICE_IDS_PER_REQUEST) {
+      const allIncidents: PDIncident[] = [];
+      const chunks: string[][] = [];
+      for (let i = 0; i < params.serviceIds.length; i += MAX_SERVICE_IDS_PER_REQUEST) {
+        chunks.push(params.serviceIds.slice(i, i + MAX_SERVICE_IDS_PER_REQUEST));
+      }
+
+      let chunkIdx = 0;
+      for (const chunk of chunks) {
+        chunkIdx++;
+        console.log(
+          `[PD Client] Fetching incidents for service chunk ${chunkIdx}/${chunks.length} (${chunk.length} services)`
+        );
+        // Budget per chunk: prefer an explicit per-service cap, then a total cap,
+        // then fall back to a 60-incident-per-service safety buffer.
+        const perServiceBudget = params.maxIncidentsPerService ?? 60;
+        const chunkMaxEntries = params.maxIncidents ?? chunk.length * perServiceBudget;
+        const chunkResults = await this.listIncidents({
+          ...params,
+          serviceIds: chunk,
+          maxIncidents: chunkMaxEntries,
+          onPage: params.onPage
+            ? (fetched, hasMore) => {
+                params.onPage!(allIncidents.length + fetched, hasMore);
+              }
+            : undefined,
+        });
+        allIncidents.push(...chunkResults);
+      }
+      return allIncidents;
+    }
+
     // PD API limits the date range to ~6 months for /incidents.
     // For longer ranges, break into 180-day chunks and merge results.
     const sinceDate = new Date(params.since);
@@ -172,6 +328,7 @@ export class PagerDutyClient {
         ...params,
         since: chunkStart.toISOString(),
         until: chunkEnd.toISOString(),
+        maxIncidents: params.maxIncidents,
         onPage: params.onPage
           ? (fetched, hasMore) => {
               params.onPage!(allIncidents.length + fetched, hasMore);
@@ -191,6 +348,8 @@ export class PagerDutyClient {
     serviceIds?: string[];
     since: string;
     until: string;
+    maxIncidents?: number;
+    maxIncidentsPerService?: number;
     onPage?: (fetched: number, hasMore: boolean) => void;
   }): Promise<PDIncident[]> {
     const requestParams: Record<string, any> = {
@@ -212,8 +371,71 @@ export class PagerDutyClient {
       "/incidents",
       "incidents",
       requestParams,
-      params.onPage
+      params.onPage,
+      params.maxIncidents
     );
+  }
+
+  /**
+   * List change events (deployment events) for the given time range.
+   * Returns empty array if the endpoint is unavailable (plan tier limitation).
+   */
+  async listChangeEvents(params: {
+    since: string;
+    until: string;
+    serviceIds?: string[];
+    limit?: number;
+  }): Promise<PDChangeEvent[]> {
+    try {
+      const requestParams: Record<string, any> = {
+        since: params.since,
+        until: params.until,
+      };
+      if (params.serviceIds && params.serviceIds.length > 0) {
+        requestParams.service_ids = params.serviceIds;
+      }
+      return await this.paginateAll<PDChangeEvent>(
+        "/change_events",
+        "change_events",
+        requestParams,
+        undefined,
+        params.limit ?? 1000
+      );
+    } catch {
+      return [];
+    }
+  }
+
+  /**
+   * Get aggregate incident metrics per service for the given time range.
+   * Uses POST /analytics/metrics/incidents/services — handles all service IDs
+   * in the request body so there is no URL length limit.
+   * Returns empty array if the endpoint is unavailable (plan tier limitation).
+   */
+  async getAnalyticsMetricsByService(params: {
+    serviceIds: string[];
+    since: string;
+    until: string;
+  }): Promise<PDAnalyticsServiceMetric[]> {
+    try {
+      const body = {
+        filters: {
+          created_at_start: params.since,
+          created_at_end: params.until,
+          ...(params.serviceIds.length > 0 ? { service_ids: params.serviceIds } : {}),
+        },
+        time_zone: 'UTC',
+      };
+      const response = await this.request<{ data: PDAnalyticsServiceMetric[] }>(
+        'POST',
+        '/analytics/metrics/incidents/services',
+        body
+      );
+      return response.data || [];
+    } catch {
+      // Not available on this plan tier — gracefully return empty
+      return [];
+    }
   }
 
   /**
@@ -391,10 +613,15 @@ export class PagerDutyClient {
    * List all Event Orchestrations (global)
    */
   async listEventOrchestrations(): Promise<PDEventOrchestration[]> {
-    return this.paginateAll<PDEventOrchestration>(
-      "/event_orchestrations",
-      "orchestrations"
-    );
+    try {
+      return await this.paginateAll<PDEventOrchestration>(
+        "/event_orchestrations",
+        "orchestrations"
+      );
+    } catch {
+      // Event orchestrations may not be available on all plan tiers
+      return [];
+    }
   }
 
   /**

@@ -1,6 +1,7 @@
 import { prisma } from '@/server/db/client'
 import { decryptToken } from '@/server/db/encryption'
 import { PagerDutyClient } from '@/server/services/pd/client'
+import type { PDAnalyticsServiceMetric } from '@/server/services/pd/types'
 import { jobProgress } from '@/server/services/job-progress'
 import { analyzeVolume } from '@/server/services/analysis/volume'
 import { analyzeNoise } from '@/server/services/analysis/noise'
@@ -197,37 +198,94 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
 
     console.log(`[EvaluationRunner] Scope: ${scopedServicePdIds.size} services, ${scopedTeamPdIds.size} teams`)
 
-    // ── Step 3: Pull incidents scoped to selection (progress 10-35%) ──
-    jobProgress.updateProgress(jobId, {
-      status: 'running',
-      progress: 10,
-      message: `Pulling incidents for ${scopeIds.length} ${scopeType === 'TEAM' ? 'teams' : 'services'} over ${timeRangeDays} days...`,
-    })
+    // ── Step 3: Pull incidents (two-track for Full Domain; analytics-only for Config Only) ──
 
-    const incidentParams =
-      scopeType === 'TEAM'
-        ? { teamIds: scopeIds, since, until }
-        : { serviceIds: scopeIds, since, until }
+    // Analytics API: always used for Full Domain and Config Only modes.
+    // POST-based — handles all service IDs with no URL length limit.
+    let analyticsMetrics: PDAnalyticsServiceMetric[] = []
+    if (evaluation.isFullDomain || evaluation.configOnly) {
+      jobProgress.updateProgress(jobId, {
+        status: 'running',
+        progress: 8,
+        message: `Fetching aggregate analytics for ${scopedServicePdIds.size} services...`,
+      })
+      analyticsMetrics = await pdClient.getAnalyticsMetricsByService({
+        serviceIds: Array.from(scopedServicePdIds),
+        since,
+        until,
+      })
+      console.log(`[EvaluationRunner] Analytics: got metrics for ${analyticsMetrics.length} services`)
+    }
 
-    const incidents = await pdClient.listIncidents({
-      ...incidentParams,
-      onPage: (fetched, hasMore) => {
-        const progress = hasMore ? Math.min(10 + Math.floor(fetched / 50), 34) : 35
-        jobProgress.updateProgress(jobId, {
-          status: 'running',
-          progress,
-          message: `Pulled ${fetched.toLocaleString()} incidents so far${hasMore ? '...' : '. Done!'}`,
-        })
-      },
-    })
+    // Track A: per-service incident sample (skipped in Config Only mode)
+    let workingIncidents: Awaited<ReturnType<typeof pdClient.listIncidents>> = []
 
-    console.log(`[EvaluationRunner] Pulled ${incidents.length} incidents`)
+    if (evaluation.configOnly) {
+      console.log('[EvaluationRunner] Config-only mode: skipping incident/log pulls')
+      jobProgress.updateProgress(jobId, {
+        status: 'running',
+        progress: 35,
+        message: 'Config-only mode: using snapshot data + analytics API...',
+      })
+    } else {
+      const FULL_DOMAIN_CAP_PER_SERVICE = 15
+      const incidentMessage = evaluation.isFullDomain
+        ? `Sampling up to ${FULL_DOMAIN_CAP_PER_SERVICE} incidents per service (${scopedServicePdIds.size} services)...`
+        : `Pulling incidents for ${scopeIds.length} ${scopeType === 'TEAM' ? 'teams' : 'services'} over ${timeRangeDays} days...`
 
-    jobProgress.updateProgress(jobId, {
-      status: 'running',
-      progress: 35,
-      message: `Pulled ${incidents.length.toLocaleString()} incidents. Fetching scoped service details...`,
-    })
+      jobProgress.updateProgress(jobId, {
+        status: 'running',
+        progress: 10,
+        message: incidentMessage,
+      })
+
+      const incidentParams =
+        scopeType === 'TEAM'
+          ? { teamIds: scopeIds, since, until }
+          : { serviceIds: scopeIds, since, until }
+
+      const incidents = await pdClient.listIncidents({
+        ...incidentParams,
+        // For Full Domain: pass the per-service cap so each chunk only fetches
+        // chunkSize × 15 incidents instead of the default chunkSize × 60 buffer.
+        // This prevents over-fetching when the in-memory cap would discard the excess anyway.
+        maxIncidentsPerService: evaluation.isFullDomain ? FULL_DOMAIN_CAP_PER_SERVICE : undefined,
+        onPage: (fetched, hasMore) => {
+          const progress = hasMore ? Math.min(10 + Math.floor(fetched / 50), 34) : 35
+          jobProgress.updateProgress(jobId, {
+            status: 'running',
+            progress,
+            message: `Pulled ${fetched.toLocaleString()} incidents so far${hasMore ? '...' : '. Done!'}`,
+          })
+        },
+      })
+
+      console.log(`[EvaluationRunner] Pulled ${incidents.length} incidents`)
+
+      // Apply per-service cap in-memory (Full Domain only).
+      // PD returns newest-first so slice(0, N) keeps the N most recent per service.
+      workingIncidents = incidents
+      if (evaluation.isFullDomain && incidents.length > 0) {
+        const byService = new Map<string, typeof incidents>()
+        for (const inc of incidents) {
+          const svcId = inc.service?.id || '__unknown__'
+          const bucket = byService.get(svcId) || []
+          bucket.push(inc)
+          byService.set(svcId, bucket)
+        }
+        workingIncidents = []
+        for (const bucket of byService.values()) {
+          workingIncidents.push(...bucket.slice(0, FULL_DOMAIN_CAP_PER_SERVICE))
+        }
+        console.log(`[EvaluationRunner] Full domain cap: ${incidents.length} → ${workingIncidents.length} incidents (${FULL_DOMAIN_CAP_PER_SERVICE}/service)`)
+      }
+
+      jobProgress.updateProgress(jobId, {
+        status: 'running',
+        progress: 35,
+        message: `Pulled ${workingIncidents.length.toLocaleString()} incidents. Fetching scoped service details...`,
+      })
+    }
 
     // ── Step 4: Pull service details only for scoped services ──
     const serviceParams =
@@ -247,18 +305,23 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
       message: `Found ${services.length} scoped services. Sampling log entries...`,
     })
 
-    // ── Step 5: Pull log entries (sample for noise analysis) ──
+    // ── Step 5: Pull log entries (sample for noise analysis; skipped in Config Only mode) ──
     let logEntries: any[] = []
+    if (!evaluation.configOnly) {
     try {
       const logSince = timeRangeDays > 30
         ? new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString()
         : since
 
+      // For full domain runs, use a fixed low cap — the analytics API provides accurate
+      // aggregate metrics so log entries are only needed for pattern detection.
+      const maxLogEntries = evaluation.isFullDomain ? 3000 : 50000
+
       logEntries = await pdClient.getLogEntries({
         since: logSince,
         until,
         isOverview: false,
-        maxEntries: 50000, // Cap to prevent OOM on large accounts
+        maxEntries: maxLogEntries,
         onPage: (fetched, hasMore) => {
           const progress = hasMore ? Math.min(50 + Math.floor(fetched / 100), 59) : 60
           jobProgress.updateProgress(jobId, {
@@ -271,6 +334,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     } catch (err) {
       console.warn('[EvaluationRunner] Log entries API failed, continuing without:', err)
     }
+    } // end if (!evaluation.configOnly)
 
     jobProgress.updateProgress(jobId, {
       status: 'running',
@@ -290,7 +354,21 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
       integrationsMap.set(svc.id, svc.integrations || [])
     })
 
-    // ── Step 6b: Alert payload sampling for source identification (Layer 4) ──
+    // ── Step 6b: Fetch change event counts per service ──
+    const changeEventCountByServiceId = new Map<string, number>()
+    try {
+      const changeEvents = await pdClient.listChangeEvents({ since, until })
+      for (const ce of changeEvents) {
+        for (const svc of ce.services || []) {
+          changeEventCountByServiceId.set(svc.id, (changeEventCountByServiceId.get(svc.id) ?? 0) + 1)
+        }
+      }
+      console.log(`[EvaluationRunner] Fetched ${changeEvents.length} change events across ${changeEventCountByServiceId.size} services`)
+    } catch (err) {
+      console.warn('[EvaluationRunner] Could not fetch change events, continuing without:', err instanceof Error ? err.message : err)
+    }
+
+    // ── Step 6c: Alert payload sampling for source identification (Layer 4) ──
     // Six-layer source detection: when service integrations have null/generic vendor
     // metadata, sample alert payloads and parse titles to identify actual monitoring sources.
     jobProgress.updateProgress(jobId, { status: 'running', progress: 62, message: 'Sampling alert payloads for source identification...' })
@@ -367,7 +445,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     ])
 
     const titleSources = new Map<string, Set<string>>() // serviceId → set of sources from titles
-    for (const incident of incidents) {
+    for (const incident of workingIncidents) {
       const serviceId = incident.service?.id
       if (!serviceId) continue
       const title = incident.title || ''
@@ -408,7 +486,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
         if (noNewSourceCount >= MAX_NO_NEW_SOURCE) break
 
         // Get a few recent incidents for this service from our already-pulled data
-        const serviceIncidents = incidents
+        const serviceIncidents = workingIncidents
           .filter((i: any) => i.service?.id === serviceId)
           .slice(0, 3)
 
@@ -476,13 +554,13 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
 
     // ── Step 7: Run analysis engines ──
     jobProgress.updateProgress(jobId, { status: 'running', progress: 65, message: 'Analyzing incident volume...' })
-    const volumeAnalysis = analyzeVolume(incidents, services)
+    const volumeAnalysis = analyzeVolume(workingIncidents, services, analyticsMetrics)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 72, message: 'Analyzing noise patterns...' })
-    const noiseAnalysis = analyzeNoise(incidents, logEntries)
+    const noiseAnalysis = analyzeNoise(workingIncidents, logEntries)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 78, message: 'Identifying alert sources...' })
-    const sourceAnalysis = analyzeSources(incidents, services, integrationsMap, serviceToOrchestrations, serviceSourceMap, alertSourceMap)
+    const sourceAnalysis = analyzeSources(workingIncidents, services, integrationsMap, serviceToOrchestrations, serviceSourceMap, alertSourceMap)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 84, message: 'Detecting shadow stack integrations...' })
     // Gather account-level resources (extensions, webhooks, workflows) for shadow stack detection
@@ -506,7 +584,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
       console.log(`[EvaluationRunner]   Workflow "${wr.name}": ${steps.length} steps, ${triggers.length} triggers, action_ids=[${actionIds.join(', ')}]`)
     }
 
-    const shadowStackAnalysis = analyzeShadowStack(incidents, logEntries, services, integrationsMap, serviceToOrchestrations, accountLevelResources, allEoDetails)
+    const shadowStackAnalysis = analyzeShadowStack(workingIncidents, logEntries, services, integrationsMap, serviceToOrchestrations, accountLevelResources, allEoDetails)
 
     jobProgress.updateProgress(jobId, { status: 'running', progress: 88, message: 'Calculating risk assessment...' })
     // Only pass scoped resources into risk analysis — enrich with parsed configJson
@@ -606,7 +684,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
 
     const mappingData = scopedMappingResources.map((resource) => {
       const configJson = configJsonByPdId.get(resource.pdId) || Buffer.from('{}')
-      const mapping = getResourceMapping({ ...resource, configJson }, serviceToOrchestrations, integrationsMap)
+      const mapping = getResourceMapping({ ...resource, configJson }, serviceToOrchestrations, integrationsMap, changeEventCountByServiceId)
       return {
         evaluationId,
         pdResourceId: resource.id,
@@ -658,6 +736,7 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
           risk: riskAnalysis,
           shadowStack: shadowStackAnalysis,
           projectPlan,
+          analyticsAvailable: analyticsMetrics.length > 0,
           scopedCounts: {
             services: scopedServicePdIds.size,
             teams: scopedTeamPdIds.size,
@@ -675,12 +754,12 @@ export async function runEvaluationAnalysis(evaluationId: string): Promise<void>
     jobProgress.updateProgress(jobId, {
       status: 'completed',
       progress: 100,
-      message: `Analysis complete. ${incidents.length} incidents analyzed across ${services.length} services.`,
+      message: `Analysis complete. ${workingIncidents.length} incidents analyzed across ${services.length} services.`,
     })
 
     console.log(
       `[EvaluationRunner] Completed ${evaluationId}: ` +
-        `${incidents.length} incidents, ${services.length} services, ` +
+        `${workingIncidents.length} incidents, ${services.length} services, ` +
         `${scopedMappingResources.length} mappings, ` +
         `risk=${riskAnalysis.overallComplexity}`
     )
@@ -729,6 +808,7 @@ function getResourceMapping(
   },
   serviceToOrchestrations: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number }>>,
   integrationsMap: Map<string, any[]>,
+  changeEventCountByServiceId: Map<string, number>,
 ): MappingResult {
   switch (resource.pdType) {
     case 'SCHEDULE':
@@ -759,7 +839,7 @@ function getResourceMapping(
       }
 
     case 'SERVICE':
-      return getServiceMapping(resource, serviceToOrchestrations, integrationsMap)
+      return getServiceMapping(resource, serviceToOrchestrations, integrationsMap, changeEventCountByServiceId)
 
     case 'BUSINESS_SERVICE':
       return {
@@ -811,6 +891,7 @@ function getServiceMapping(
   resource: { pdId: string; name: string; configJson: Uint8Array },
   serviceToOrchestrations: Map<string, Array<{ eoName: string; eoPdId: string; ruleCount: number }>>,
   integrationsMap: Map<string, any[]>,
+  changeEventCountByServiceId: Map<string, number>,
 ): MappingResult {
   const eos = serviceToOrchestrations.get(resource.pdId) || []
   const integrations = integrationsMap.get(resource.pdId) || []
@@ -819,6 +900,7 @@ function getServiceMapping(
   const integrationTypes: string[] = []
   let hasEmailIntegration = false
   let hasApiIntegration = false
+  let hasChangeIntegration = false
   let monitoringTools: string[] = []
 
   for (const intg of integrations) {
@@ -829,6 +911,10 @@ function getServiceMapping(
     if (type.includes('email') || vendor.includes('email')) {
       hasEmailIntegration = true
       integrationTypes.push('Email')
+    } else if (type.includes('change_events') || vendor === 'change events' || summary.includes('change event')) {
+      // Must check before events_api: "change_events_api_v2_inbound_integration" contains "events_api"
+      hasChangeIntegration = true
+      integrationTypes.push('Change Events')
     } else if (type.includes('events_api') || type.includes('generic_events_api')) {
       hasApiIntegration = true
       integrationTypes.push('Events API')
@@ -869,6 +955,20 @@ function getServiceMapping(
 
   if (hasEmailIntegration) {
     notes.push('Has email integration — incident.io supports email alert sources natively.')
+  }
+
+  if (hasChangeIntegration) {
+    const changeCount = changeEventCountByServiceId.get(resource.pdId) ?? 0
+    if (changeCount > 0) {
+      notes.push(
+        `Active change integration: ${changeCount} change events in analysis period. ` +
+        `PD change events have no direct equivalent in incident.io — review deployment correlation workflows before migrating.`
+      )
+      effortEstimate = 'High'
+    } else {
+      notes.push('Has change integration but no activity in analysis period. Likely safe to migrate without impact.')
+      effortEstimate = 'Low'
+    }
   }
 
   if (hasApiIntegration && eos.length === 0) {

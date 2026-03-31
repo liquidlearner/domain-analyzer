@@ -5,6 +5,7 @@ import type {
   PDEscalationPolicy,
   PDUser,
   PDBusinessService,
+  PDServiceDependency,
   PDIncident,
   PDRuleset,
 } from '@/server/services/pd/types'
@@ -89,12 +90,28 @@ export const configExport = inngest.createFunction(
       })
 
       // Step 3: Pull teams
-      const teams = await step.run('pull-teams', async () => {
+      const rawTeams = await step.run('pull-teams', async () => {
         const result = await pdClient.listTeams()
         jobProgress.updateProgress(domainId, {
           status: 'running',
           progress: 30,
           message: `Fetched ${result.length} teams`,
+        })
+        return result
+      })
+
+      // Step 3b: Enrich teams with member roles (batched, 10 concurrent)
+      const teams = await step.run('enrich-team-members', async () => {
+        jobProgress.updateProgress(domainId, {
+          status: 'running',
+          progress: 32,
+          message: `Fetching members for ${rawTeams.length} teams...`,
+        })
+        const result = await pdClient.enrichTeamsWithMembers(rawTeams)
+        jobProgress.updateProgress(domainId, {
+          status: 'running',
+          progress: 35,
+          message: `Enriched ${result.length} teams with member roles`,
         })
         return result
       })
@@ -147,6 +164,33 @@ export const configExport = inngest.createFunction(
           })
           return result
         }
+      )
+
+      // Step 7b: Pull technical service dependency graph (single bulk call)
+      const serviceDependencies: PDServiceDependency[] = await step.run('pull-service-dependencies', async () => {
+        const result = await pdClient.listServiceDependencies()
+        jobProgress.updateProgress(domainId, {
+          status: 'running',
+          progress: 72,
+          message: `Fetched ${result.length} service dependency relationships`,
+        })
+        return result
+      })
+
+      // Step 7c: Pull business service → technical service dependencies (batched)
+      const bsDepsResults = await step.run('pull-business-service-dependencies', async () => {
+        const results = await Promise.allSettled(
+          businessServices.map((bs) => pdClient.getBusinessServiceDependencies(bs.id))
+        )
+        return businessServices.map((bs, i) => ({
+          bsId: bs.id,
+          supportingIds: results[i].status === 'fulfilled'
+            ? results[i].value.map((d: PDServiceDependency) => d.supporting_service.id)
+            : [],
+        }))
+      })
+      const bsDepsMap = new Map<string, string[]>(
+        bsDepsResults.map(({ bsId, supportingIds }) => [bsId, supportingIds])
       )
 
       // Step 8: Pull rulesets
@@ -239,6 +283,17 @@ export const configExport = inngest.createFunction(
         return await pdClient.getSlackConnections()
       })
 
+      // Step 11c: Fetch account abilities (plan/feature entitlements)
+      const accountAbilities = await step.run('pull-account-abilities', async () => {
+        const abilities = await pdClient.getAccountAbilities()
+        jobProgress.updateProgress(domainId, {
+          status: 'running',
+          progress: 79,
+          message: `Fetched ${abilities.length} account abilities`,
+        })
+        return abilities
+      })
+
       // Step 12: Pull Event Orchestrations with router rules (reveals dynamic routing)
       const eventOrchestrations = await step.run('pull-event-orchestrations', async () => {
         try {
@@ -318,6 +373,17 @@ export const configExport = inngest.createFunction(
         const servicesWithIncidents = new Set(
           incidents.map((i) => i.service?.id).filter(Boolean)
         )
+
+        // Build technical service dependency map
+        const techDepMap = new Map<string, { dependsOn: string[]; dependedOnBy: string[] }>()
+        for (const dep of serviceDependencies) {
+          const depId = dep.dependent_service.id
+          const supId = dep.supporting_service.id
+          if (!techDepMap.has(depId)) techDepMap.set(depId, { dependsOn: [], dependedOnBy: [] })
+          if (!techDepMap.has(supId)) techDepMap.set(supId, { dependsOn: [], dependedOnBy: [] })
+          techDepMap.get(depId)!.dependsOn.push(supId)
+          techDepMap.get(supId)!.dependedOnBy.push(depId)
+        }
 
         // Build resources map for dependency tracking
         const resources: Record<string, ResourceWithDependencies> = {}
@@ -400,12 +466,13 @@ export const configExport = inngest.createFunction(
 
         // Add business services
         for (const bs of businessServices) {
+          const supportingIds = bsDepsMap.get(bs.id) ?? []
           resources[bs.id] = {
             pdId: bs.id,
             type: 'BUSINESS_SERVICE',
             name: bs.name || '',
             teamIds: [],
-            dependencies: (bs as any).service?.id ? [(bs as any).service.id] : [],
+            dependencies: supportingIds,
             isStale: false,
           }
         }
@@ -544,6 +611,26 @@ export const configExport = inngest.createFunction(
 
         // Build richer configJson map for specific resource types
         const richConfigMap = new Map<string, any>()
+
+        // Fold service dependency graph into each service's config
+        for (const service of services) {
+          const techDeps = techDepMap.get(service.id)
+          richConfigMap.set(service.id, {
+            ...service,
+            _dependsOn: techDeps?.dependsOn ?? [],
+            _dependedOnBy: techDeps?.dependedOnBy ?? [],
+          })
+        }
+
+        // Fold supporting service IDs into each business service's config
+        for (const bs of businessServices) {
+          const supportingIds = bsDepsMap.get(bs.id) ?? []
+          richConfigMap.set(bs.id, {
+            ...bs,
+            _supportingServices: supportingIds,
+          })
+        }
+
         for (const ext of extensions) {
           richConfigMap.set(ext.id, {
             extension_schema: ext.extension_schema,
@@ -583,6 +670,24 @@ export const configExport = inngest.createFunction(
             _routedServiceIds: (eo as any)._routedServiceIds,
           })
         }
+
+        // Store account abilities as an ACCOUNT_INFO resource (singleton per snapshot)
+        await prisma.pdResource.upsert({
+          where: { snapshotId_pdId: { snapshotId: configSnapshot.id, pdId: 'account' } },
+          create: {
+            snapshotId: configSnapshot.id,
+            pdType: 'ACCOUNT_INFO',
+            pdId: 'account',
+            name: domain.subdomain,
+            teamIds: [],
+            dependencies: [],
+            configJson: Buffer.from(JSON.stringify({ abilities: accountAbilities }), 'utf8'),
+            isStale: false,
+          },
+          update: {
+            configJson: Buffer.from(JSON.stringify({ abilities: accountAbilities }), 'utf8'),
+          },
+        })
 
         // Create PdResource records in batches for performance
         const CHUNK_SIZE = 500

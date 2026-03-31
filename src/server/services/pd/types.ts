@@ -16,6 +16,12 @@ export interface PDUser {
   user_url?: string;
   invitation_sent?: boolean;
   confirmation_sent?: boolean;
+  role?: 'admin' | 'user' | 'limited_user' | 'read_only_user' | 'read_only_limited_user' | 'stakeholder' | 'observer';
+}
+
+export interface PDTeamMember {
+  user: PDUser;
+  role: "manager" | "responder" | "observer";
 }
 
 export interface PDTeam {
@@ -27,7 +33,25 @@ export interface PDTeam {
   name?: string;
   description?: string;
   default_role?: string;
-  members?: PDUser[];
+  members?: PDTeamMember[];
+}
+
+export interface PDScheduleRestriction {
+  type: "daily" | "weekly";
+  duration_seconds: number;
+  start_time_of_day: string;   // HH:MM:SS
+  start_day_of_week?: number;  // 1=Mon … 7=Sun (weekly restrictions only)
+}
+
+export interface PDScheduleLayer {
+  id: string;
+  name?: string;
+  start?: string;
+  end?: string | null;
+  rotation_virtual_start?: string;
+  rotation_turn_length_seconds?: number;
+  users?: Array<{ user: PDUser }>;
+  restrictions?: PDScheduleRestriction[];
 }
 
 export interface PDSchedule {
@@ -39,6 +63,7 @@ export interface PDSchedule {
   name?: string;
   description?: string;
   time_zone?: string;
+  schedule_layers?: PDScheduleLayer[];
   escalation_policies?: PDEscalationPolicy[];
   teams?: PDTeam[];
   users?: PDUser[];
@@ -93,6 +118,13 @@ export interface PDIntegration {
   };
 }
 
+export interface PDServiceDependency {
+  id: string;
+  type: "service_dependency";
+  supporting_service: { id: string; type: string; summary?: string };
+  dependent_service: { id: string; type: string; summary?: string };
+}
+
 export interface PDService {
   id: string;
   type: "service_reference" | "service";
@@ -118,6 +150,14 @@ export interface PDService {
     end_time: string;
   } | null;
   status_update_type?: string;
+  alert_grouping_parameters?: {
+    type: "intelligent" | "time" | "content_based" | null;
+    config?: {
+      timeout?: number | null;
+      aggregate?: "all" | "any";
+      fields?: string[];
+    } | null;
+  };
 }
 
 export interface PDBusinessService {
@@ -206,6 +246,16 @@ export interface PDLogEntry {
   teams?: PDTeam[];
   channels?: Array<{ type: string; summary?: string }>;
   context?: Record<string, any>;
+}
+
+export interface PDAnalyticsServiceMetric {
+  service_id: string;
+  service_name?: string;
+  total_incident_count: number;
+  mean_seconds_to_resolve: number | null;
+  mean_seconds_to_first_ack: number | null;
+  total_noise_events?: number;
+  total_escalation_count?: number;
 }
 
 export interface PDAnalyticsIncident {
@@ -462,6 +512,16 @@ export interface PDAutomationInvocation {
     state?: string;
     creation_timestamp?: string;
   }>;
+}
+
+export interface PDChangeEvent {
+  id: string;
+  type: "change_event";
+  summary?: string;
+  source?: string;
+  timestamp: string;
+  services?: Array<{ id: string; type: string; summary?: string }>;
+  integration?: { id: string; type: string };
 }
 
 export interface PDPaginatedResponse<T> {
