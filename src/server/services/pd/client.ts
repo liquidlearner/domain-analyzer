@@ -167,8 +167,11 @@ export class PagerDutyClient {
    * List all schedules
    */
   async listSchedules(): Promise<PDSchedule[]> {
-    // schedule_layers are returned in the default response body — no include param needed
-    return this.paginateAll<PDSchedule>("/schedules", "schedules");
+    // schedule_layers and users are NOT returned by default on the list endpoint — must be
+    // explicitly requested. teams gives ownership info.
+    return this.paginateAll<PDSchedule>("/schedules", "schedules", {
+      include: ['schedule_layers', 'users', 'teams'],
+    });
   }
 
   /**
@@ -429,6 +432,7 @@ export class PagerDutyClient {
       const response = await this.request<{ data: PDAnalyticsServiceMetric[] }>(
         'POST',
         '/analytics/metrics/incidents/services',
+        {},
         body
       );
       return response.data || [];

@@ -52,3 +52,6 @@ next-env.d.ts
 /mnt/
 /tmp/
 /.prisma/
+
+# pd-analyzer output reports — never commit customer data
+pd-analysis-*.html
