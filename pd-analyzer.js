@@ -686,6 +686,12 @@ const SHADOW_REPLACEMENT = {
   enrichment_middleware:{ feature: 'Catalog + Workflows',             action: 'Replace custom event transformer enrichment with Catalog attributes.',           effort: 'Medium — 2-3 days' },
   analytics_pipeline:   { feature: 'incident.io Webhooks + API',      action: 'Reconfigure data export pipeline to consume incident.io webhook events or API.', effort: 'Medium — 2-3 days' },
   api_consumer:         { feature: 'incident.io API',                 action: 'Update API endpoint and auth to incident.io. Review for PD-specific fields.',    effort: 'Medium — per consumer' },
+  // Live Call Routing has no incident.io equivalent — this is a potential migration blocker.
+  // Customers must resolve LCR dependency (third-party, PD retention, or decommission) before
+  // full cutover. Flag prominently.
+  live_call_routing:    { feature: 'No native equivalent in incident.io',
+                          action: 'incident.io does not provide phone-based Live Call Routing. Options: (1) retain PagerDuty solely for LCR during transition, (2) migrate to a dedicated call routing solution (e.g. Twilio, Amazon Connect), or (3) decommission LCR if usage is low. Must be resolved before full PD cutover.',
+                          effort: 'High — requires decision and potentially a third-party solution' },
 };
 
 function analyzeShadowStack(config) {
@@ -787,6 +793,31 @@ function analyzeShadowStack(config) {
     }
   }
 
+  // ── 7. Live Call Routing (LCR) — phone-based inbound routing ─────────────
+  // PagerDuty Live Call Routing has no equivalent in incident.io.
+  // Integration type is 'live_call_routing_inbound_integration'.
+  // Also check for vendor name matches for robustness.
+  const LCR_PATTERNS = ['live_call_routing', 'live_call_routing_inbound_integration', 'lcr_inbound'];
+  for (const svc of config.services) {
+    const integrations = svc.integrations || [];
+    for (const int of integrations) {
+      const type   = (int.type || '').toLowerCase();
+      const vendor = (int.vendor?.name || int.name || '').toLowerCase();
+      const isLCR  = LCR_PATTERNS.some(p => type.includes(p) || vendor.includes(p));
+      if (isLCR) {
+        signals.push({
+          type: 'live_call_routing',
+          confidence: 'high',
+          evidence: `Live Call Routing integration on service "${svc.name}" (integration: ${int.name || int.type})`,
+          description: `Live Call Routing: "${svc.name}"`,
+          serviceName: svc.name,
+          serviceId: svc.id,
+          incidentIoReplacement: SHADOW_REPLACEMENT.live_call_routing,
+        });
+      }
+    }
+  }
+
   // ── Deduplicate by (type, description) ──────────────────────────────────
   const seen = new Set();
   const deduped = signals.filter(s => {
@@ -799,9 +830,10 @@ function analyzeShadowStack(config) {
   const webhookCount     = deduped.filter(s => s.type === 'webhook_destination' || s.type === 'analytics_pipeline').length;
   const automationCount  = deduped.filter(s => s.type === 'automation_action').length;
   const eoCount          = deduped.filter(s => s.type === 'eo_routing_layer').length;
+  const lcrCount         = deduped.filter(s => s.type === 'live_call_routing').length;
 
-  const burden = (deduped.length >= 10 || automationCount >= 3) ? 'high'
-               : (deduped.length >= 4  || webhookCount >= 2)    ? 'medium'
+  const burden = (deduped.length >= 10 || automationCount >= 3 || lcrCount > 0) ? 'high'
+               : (deduped.length >= 4  || webhookCount >= 2)                    ? 'medium'
                : 'low';
 
   const narrativeParts = [];
@@ -810,6 +842,7 @@ function analyzeShadowStack(config) {
   if (config.incidentWorkflows.filter(w => w.steps?.length).length) narrativeParts.push(`${config.incidentWorkflows.filter(w => w.steps?.length).length} active incident workflow${config.incidentWorkflows.filter(w => w.steps?.length).length !== 1 ? 's' : ''}`);
   if (eoCount)          narrativeParts.push(`${eoCount} event orchestration layer${eoCount !== 1 ? 's' : ''}`);
   if (automationCount)  narrativeParts.push(`${automationCount} automation action${automationCount !== 1 ? 's' : ''}`);
+  if (lcrCount)         narrativeParts.push(`${lcrCount} Live Call Routing number${lcrCount !== 1 ? 's' : ''} (migration blocker — no incident.io equivalent)`);
 
   const narrative = narrativeParts.length
     ? `Shadow stack includes: ${narrativeParts.join(', ')}. Each component requires explicit migration planning.`
@@ -820,6 +853,7 @@ function analyzeShadowStack(config) {
     webhookDestinationCount: webhookCount,
     automationPatternCount:  automationCount,
     eoRoutingLayerCount:     eoCount,
+    lcrCount,
     apiConsumerCount:        0, // log-entry based — not available in config-only mode
     estimatedMaintenanceBurden: burden,
     maintenanceNarrative: narrative,
@@ -896,6 +930,14 @@ function analyzeRisk(config, shadowStack, conversions) {
     signals.push({
       type: 'complex_eo', severity: 'medium',
       description: `${config.eventOrchestrations.length} Event Orchestrations — routing logic must be re-implemented as alert routes`,
+    });
+  }
+
+  // Live Call Routing — migration blocker (no incident.io equivalent)
+  if (shadowStack.lcrCount > 0) {
+    signals.push({
+      type: 'live_call_routing_blocker', severity: 'high',
+      description: `${shadowStack.lcrCount} Live Call Routing number${shadowStack.lcrCount !== 1 ? 's' : ''} detected — no incident.io equivalent. Must be resolved before full PagerDuty cutover.`,
     });
   }
 
@@ -1198,11 +1240,26 @@ function generateHTMLReport({ domain, analysisDate, days, config, conversions, s
     api_consumer:          'API Consumers',
     auto_ack:              'Auto-Acknowledge Patterns',
     auto_resolve:          'Auto-Resolve Patterns',
+    live_call_routing:     'Live Call Routing Numbers',
   };
+
+  // LCR blocker banner — shown when Live Call Routing is detected (no incident.io equivalent)
+  const lcrBlockerBanner = shadowStack.lcrCount > 0 ? `
+    <div style="background:#fff7ed;border:2px solid #f97316;border-radius:8px;padding:14px 16px;margin-bottom:16px;display:flex;gap:12px;align-items:flex-start">
+      <span style="font-size:22px;line-height:1">⚠️</span>
+      <div>
+        <div style="font-weight:700;color:#c2410c;margin-bottom:4px">Migration Blocker: Live Call Routing Detected (${shadowStack.lcrCount} number${shadowStack.lcrCount !== 1 ? 's' : ''})</div>
+        <div style="font-size:13px;color:#7c2d12">
+          incident.io does not provide phone-based Live Call Routing. This must be resolved before full PagerDuty cutover.
+          Options: (1) retain PagerDuty solely for LCR during transition, (2) migrate to a dedicated solution
+          (e.g. Twilio, Amazon Connect), or (3) decommission LCR if usage is low.
+        </div>
+      </div>
+    </div>` : '';
 
   const shadowSection = shadowStack.signals.length === 0
     ? '<p style="color:#6b7280;padding:8px 0">No shadow stack signals detected. This domain uses PagerDuty in a standard configuration.</p>'
-    : Array.from(shadowGroups.entries()).map(([type, signals]) => {
+    : lcrBlockerBanner + Array.from(shadowGroups.entries()).map(([type, signals]) => {
         const label    = SHADOW_TYPE_LABEL[type] || type.replace(/_/g,' ');
         const rep      = signals[0].incidentIoReplacement;
         const examples = signals.slice(0, 5).map(s => {
