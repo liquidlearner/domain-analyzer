@@ -1,0 +1,23 @@
+{
+  "skill_name": "pd-migration-planner",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "I've got a scoping call with OrbitPay tomorrow. Their Head of SRE and VP of Engineering will both be on the call. Here's their pd-analysis JSON. Can you prep me for it? I want to know the key signals, what questions I should be asking, and what objections I should expect.",
+      "expected_output": "An SE Discovery Brief covering: (1) environment summary with the active vs stale service reframe as a lead, (2) the ServiceNow depth and unknown Heroku endpoint flagged as critical path items to probe, (3) 4-6 specific discovery questions with reasoning, (4) predicted objections (ServiceNow migration, migration duration, disruption risk) with suggested responses, (5) a rough timeline anchor in sprint terms.",
+      "files": ["/sessions/laughing-adoring-maxwell/mnt/uploads/pd-analysis-pdt-orbitpay-2026-04-02.json"]
+    },
+    {
+      "id": 2,
+      "prompt": "OrbitPay has moved to proposal stage. Their procurement committee is asking for a migration project plan before they'll approve the deal. They want to see sprints, milestones, and when key business outcomes land. Their VP Eng told me they need to be fully off PagerDuty within 9 months because their PD contract is up for renewal. Can you produce a project plan document I can send them?",
+      "expected_output": "A Word document (.docx) containing: (1) an environment summary that leads with the 154 active services reframe, (2) a sprint-by-sprint project plan table using 3-week sprints (~10-12 sprints for this account), (3) each sprint has a business milestone in executive language, (4) ServiceNow and the major incident workflow get their own dedicated sprints, (5) the timeline fits within or close to the 9-month constraint, (6) a risk register that calls out the unknown Heroku endpoint.",
+      "files": ["/sessions/laughing-adoring-maxwell/mnt/uploads/pd-analysis-pdt-orbitpay-2026-04-02.json"]
+    },
+    {
+      "id": 3,
+      "prompt": "Quick question — the OrbitPay CTO just asked point blank in a meeting: 'How many of our teams would be migrated in the first 90 days, and what would still be running on PagerDuty?' I need a crisp answer I can send as a follow-up email. Use the JSON data.",
+      "expected_output": "A concise, confident email-ready answer covering: (1) what gets done in the first 3 sprints (90 days) — foundation + pilot + first wave, (2) specific numbers: approximately how many of the 214 teams and what portion of the 154 active services, (3) what remains on PagerDuty at day 90 (dual-run), (4) framed positively as momentum not limitation, (5) short enough to actually send as an email reply.",
+      "files": ["/sessions/laughing-adoring-maxwell/mnt/uploads/pd-analysis-pdt-orbitpay-2026-04-02.json"]
+    }
+  ]
+}
