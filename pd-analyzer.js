@@ -68,13 +68,18 @@
 //
 //  FLAGS
 //  -----
-//    --days=N        Lookback period for stale-service detection (default: 90)
-//    --output=FILE   Output JSON filename (default: pd-analysis-DOMAIN-DATE.json)
-//    --token=KEY     PagerDuty API key (skips interactive prompt, useful for CI/scripting)
-//    --subdomain=S   PagerDuty subdomain (skips interactive prompt, useful for CI/scripting)
-//    --yes           Skip the confirmation prompt and start scanning immediately
-//    --no-color      Disable ANSI colour output in the terminal
-//    --help          Show this help text and exit
+//    --days=N          Lookback period for stale-service detection (default: 90)
+//    --output=FILE     Output JSON filename (default: pd-analysis-DOMAIN-DATE.json)
+//    --rate-limit=N    Max API requests per minute (default: 300, range: 50–900)
+//                      PagerDuty's hard cap is 900/min. The default 300 leaves
+//                      ample headroom for concurrent production API traffic.
+//                      Use 150 or lower for large enterprise accounts where
+//                      scan safety matters more than speed.
+//    --token=KEY       PagerDuty API key (skips interactive prompt, useful for CI/scripting)
+//    --subdomain=S     PagerDuty subdomain (skips interactive prompt, useful for CI/scripting)
+//    --yes             Skip the confirmation prompt and start scanning immediately
+//    --no-color        Disable ANSI colour output in the terminal
+//    --help            Show this help text and exit
 //
 //  API KEY
 //  -------
@@ -98,7 +103,7 @@ const path     = require('path');
 
 const ARGS = (() => {
   const raw = process.argv.slice(2);
-  const result = { days: 90, output: null, yes: false, noColor: false, help: false, token: null, subdomain: null };
+  const result = { days: 90, output: null, yes: false, noColor: false, help: false, token: null, subdomain: null, rateLimit: 300 };
   for (const arg of raw) {
     if (arg === '--help' || arg === '-h')   { result.help    = true; continue; }
     if (arg === '--yes'  || arg === '-y')   { result.yes     = true; continue; }
@@ -106,10 +111,17 @@ const ARGS = (() => {
     const m = arg.match(/^--(\w[\w-]*)(?:=(.+))?$/);
     if (!m) continue;
     const [, key, val] = m;
-    if (key === 'days')      result.days      = parseInt(val, 10) || 90;
-    if (key === 'output')    result.output    = val || null;
-    if (key === 'token')     result.token     = val || null;
-    if (key === 'subdomain') result.subdomain = val || null;
+    if (key === 'days')        result.days       = parseInt(val, 10) || 90;
+    if (key === 'output')      result.output     = val || null;
+    if (key === 'token')       result.token      = val || null;
+    if (key === 'subdomain')   result.subdomain  = val || null;
+    if (key === 'rate-limit') {
+      const n = parseInt(val, 10);
+      // Accept any value between 50 and 900 (PD's hard cap is 900/min).
+      // Default 300 — leaves ample headroom for concurrent production traffic.
+      if (n >= 50 && n <= 900) result.rateLimit = n;
+      else { console.error(`--rate-limit must be between 50 and 900 (got ${val}). Using default 300.`); }
+    }
   }
   return result;
 })();
@@ -122,14 +134,16 @@ USAGE
   node pd-analyzer.js [OPTIONS]
 
 OPTIONS
-  --days=N        Lookback period for stale-service detection (default: 90)
-  --output=FILE   Output JSON filename (default: pd-analysis-DOMAIN-DATE.json)
-  --yes           Skip confirmation prompt
-  --no-color      Disable ANSI colour output
-  --help          Show this help text
+  --days=N          Lookback period for stale-service detection (default: 90)
+  --output=FILE     Output JSON filename (default: pd-analysis-DOMAIN-DATE.json)
+  --rate-limit=N    Max API requests per minute (default: 300, max: 900)
+  --yes             Skip confirmation prompt
+  --no-color        Disable ANSI colour output
+  --help            Show this help text
 
 EXAMPLE
   node pd-analyzer.js --days=90
+  node pd-analyzer.js --rate-limit=150   # extra conservative for large enterprise
 
 OUTPUT
   A JSON file you send to your incident.io contact for scoping.
@@ -248,13 +262,16 @@ class PagerDutyClient {
    * @param {string} opts.token     — PagerDuty API key
    * @param {string} opts.subdomain — PagerDuty subdomain (e.g. "acme")
    */
-  constructor({ token, subdomain }) {
+  constructor({ token, subdomain, rateLimit = 300 }) {
     this.token    = token;
     this.subdomain = subdomain;
     this.baseUrl  = 'https://api.pagerduty.com';
     this._reqCount     = 0;
     this._windowStart  = Date.now();
-    this._rateLimit    = 500; // requests per minute — conservative below PD's 900/min cap
+    // Default 300 req/min — well below PD's hard cap of 900/min.
+    // Leaves headroom for concurrent production traffic on the customer's account.
+    // Override with --rate-limit=N (50–900).
+    this._rateLimit    = Math.min(Math.max(rateLimit, 50), 900);
     this._callLog      = []; // audit log for data-access explainer output
   }
 
@@ -1615,7 +1632,7 @@ async function main() {
 
   // ── Step 2: Validate the API key ──────────────────────────────────────
   step(1, 5, 'Validating API key...');
-  const client = new PagerDutyClient({ token: apiKey, subdomain: domain });
+  const client = new PagerDutyClient({ token: apiKey, subdomain: domain, rateLimit: ARGS.rateLimit });
   const validation = await client.validateToken();
 
   if (!validation.valid) {
@@ -1659,6 +1676,7 @@ async function main() {
   log(`  ${'─'.repeat(36)}`);
   log(`  Domain       : ${C.bold}${domain}.pagerduty.com${C.reset}`);
   log(`  Lookback     : ${C.bold}${ARGS.days} days${C.reset} (stale service detection)`);
+  log(`  Rate limit   : ${C.bold}${ARGS.rateLimit} req/min${C.reset}${ARGS.rateLimit < 500 ? ` ${C.dim}(conservative — scan will take longer but won't impact production API traffic)${C.reset}` : ''}`);
   log(`  Analysis mode: ${C.bold}Config-only${C.reset} (no incident content collected)`);
   log(`  Output       : ${C.bold}${ARGS.output || `pd-analysis-${domain}-${new Date().toISOString().slice(0,10)}.json`}${C.reset} (+ .log)`);
   log();
