@@ -42,8 +42,10 @@
 //    • Response plays — GET /response_plays
 //    • Maintenance windows — GET /maintenance_windows
 //    • Per-service event rules (sampled) — GET /services/{id}/rules
+//    • Status pages (public-facing) — GET /status_pages
+//    • Status dashboards (internal) — GET /status_dashboards
 //    • A list of incident IDs from the last N days (default: 90) to flag
-//      stale services. Only service IDs are used — no incident content.
+//      stale services (all statuses incl. resolved). Only service IDs are used.
 //
 //  WHAT IS NOT COLLECTED
 //  ---------------------
@@ -299,6 +301,16 @@ class PagerDutyClient {
   async listRulesets()            { try { return await this._all('/rulesets', 'rulesets'); } catch { return []; } }
   async getSlackConnections()     { try { return (await this._request('GET', '/slack_connections')).slack_connections || []; } catch { return []; } }
 
+  /**
+   * Fetch status pages (public-facing) and status dashboards (internal).
+   * Status pages are a distinct migration workstream — incident.io has a native
+   * Status Pages product that replaces both.
+   * - /status_pages: public-facing, customer-visible (newer PD feature, may 404 on older plans)
+   * - /status_dashboards: internal stakeholder dashboards
+   */
+  async listStatusPages()      { try { return await this._all('/status_pages', 'status_pages'); } catch { return []; } }
+  async listStatusDashboards() { try { return await this._all('/status_dashboards', 'status_dashboards'); } catch { return []; } }
+
   async listIncidentWorkflows() {
     try {
       const list = await this._all('/incident_workflows', 'incident_workflows');
@@ -428,15 +440,19 @@ class PagerDutyClient {
   }
 
   /**
-   * Fetch the set of service IDs that had at least one incident in the last N days.
+   * Fetch the set of service IDs that had at least one incident CREATED in the last N days.
    * Used only for stale-service detection — we do NOT collect incident content.
    *
-   * We cap each request at chunk.length incidents (one per service is sufficient
-   * to mark it active). This means one page of results per chunk rather than
-   * paginating through potentially thousands of incidents per chunk.
+   * IMPORTANT: We include all statuses (triggered, acknowledged, resolved).
+   * The PD API default omits "resolved", which causes low-priority incidents (P4/P5)
+   * that close quickly to be invisible — making active services appear stale.
+   * We want "was an incident created on this service in the last N days?" regardless
+   * of priority, urgency, or whether anyone was paged.
    *
-   * With 50 services per chunk, a 672-service domain requires ~14 API calls total
-   * instead of potentially hundreds of paginated requests.
+   * We cap at chunk.length results per chunk (one incident per service is enough
+   * to mark it active), keeping this to a single API page per chunk.
+   *
+   * With 50 services per chunk, a 672-service domain requires ~14 API calls total.
    */
   async listRecentIncidentServiceIds(serviceIds, days) {
     if (!serviceIds.length) return new Set();
@@ -447,10 +463,13 @@ class PagerDutyClient {
     for (let i = 0; i < serviceIds.length; i += MAX_PER_REQ) {
       const chunk = serviceIds.slice(i, i + MAX_PER_REQ);
       try {
-        // Cap at chunk.length — we only need one incident per service to know it's active.
-        // This keeps the fetch to a single page (100 items) per chunk.
+        // Include all statuses so resolved incidents count toward service activity.
+        // Without this, the API default (triggered + acknowledged only) misses any
+        // incident that was resolved before we ran the script.
         const incidents = await this._all('/incidents', 'incidents', {
-          since, until, service_ids: chunk,
+          since, until,
+          service_ids: chunk,
+          statuses: ['triggered', 'acknowledged', 'resolved'],
         }, undefined, chunk.length);
         incidents.forEach(inc => { if (inc.service?.id) seen.add(inc.service.id); });
       } catch { /* ignore — stale detection is best-effort */ }
@@ -599,6 +618,12 @@ async function fetchConfig(client, days, onProgress) {
   report('Fetching Slack connections...');
   const slackConnections = await client.getSlackConnections();
 
+  report('Fetching status pages and dashboards...');
+  const [statusPages, statusDashboards] = await Promise.all([
+    client.listStatusPages(),
+    client.listStatusDashboards(),
+  ]);
+
   report('Fetching account abilities (plan / feature flags)...');
   const abilities = await client.getAbilities();
 
@@ -633,7 +658,8 @@ async function fetchConfig(client, days, onProgress) {
     businessServices, serviceDeps, extensions, webhooks,
     incidentWorkflows, eventOrchestrations, automationActions,
     automationRunners, responsePlays, maintenanceWindows,
-    slackConnections, abilities, rulesets, serviceEventRules,
+    slackConnections, statusPages, statusDashboards,
+    abilities, rulesets, serviceEventRules,
     activeServiceIds, techDepMap,
   };
 }
@@ -648,8 +674,17 @@ async function fetchConfig(client, days, onProgress) {
 // ─────────────────────────────────────────────────────────────────────────────
 
 function buildReport({ domain, config, days }) {
-  const LCR_PATTERNS = ['live_call_routing', 'live_call_routing_inbound_integration', 'lcr_inbound'];
-  const CET_PATTERNS = ['custom_event_transform', 'event_transformer', 'cet'];
+  const LCR_PATTERNS        = ['live_call_routing', 'live_call_routing_inbound_integration', 'lcr_inbound'];
+  const CET_PATTERNS        = ['custom_event_transform', 'event_transformer', 'cet'];
+  const CHANGE_EVT_PATTERNS = ['change_event_transform', 'change_events_api', 'generic_change_inbound'];
+
+  // Collaboration tool detection helpers
+  const SLACK_PATTERNS  = ['slack', 'hooks.slack.com', 'pagerduty.create-slack', 'send_slack'];
+  const TEAMS_PATTERNS  = ['microsoft teams', 'teams', 'office365', 'microsoftteams', 'ms-teams'];
+  const ZOOM_PATTERNS   = ['zoom', 'zoom.us'];
+
+  const hasCollabMatch = (str, patterns) =>
+    patterns.some(p => str.toLowerCase().includes(p.toLowerCase()));
 
   // ── Users by role ────────────────────────────────────────────────────────
   const usersByRole = {};
@@ -659,24 +694,33 @@ function buildReport({ domain, config, days }) {
   }
 
   // ── Services: alert grouping + integration type breakdown ────────────────
-  const alertGrouping = {};
-  const integrationTypes = {};
-  const lcrServices    = [];
-  const cetServices    = [];
+  const alertGrouping     = {};
+  const integrationTypes  = {};
+  const lcrServices       = [];
+  const cetServices       = [];
+  const changeEvtServices = [];
 
   for (const svc of config.services) {
     const ag = svc.alert_grouping_parameters?.type || 'none';
     alertGrouping[ag] = (alertGrouping[ag] || 0) + 1;
 
-    let svcHasLCR = false;
-    let svcHasCET = false;
+    let svcHasLCR       = false;
+    let svcHasCET       = false;
+    let svcHasChangeEvt = false;
 
     for (const int of (svc.integrations || [])) {
       const type   = (int.type   || '').toLowerCase();
       const vendor = (int.vendor?.name || int.name || '').toLowerCase();
 
-      // Track integration type breakdown — use vendor name if known, else raw type
-      const label = int.vendor?.name || int.type || 'unknown';
+      // Classify change event integrations separately from alert integrations.
+      // Change events don't trigger incidents — they appear in the PD timeline only.
+      const isChangeEvt = CHANGE_EVT_PATTERNS.some(p => type.includes(p));
+
+      // Track integration type breakdown — use vendor name if known, else raw type.
+      // Prefix change event integrations so they're clearly distinct in the JSON.
+      const label = isChangeEvt
+        ? `[change_event] ${int.vendor?.name || int.type || 'unknown'}`
+        : (int.vendor?.name || int.type || 'unknown');
       integrationTypes[label] = (integrationTypes[label] || 0) + 1;
 
       if (!svcHasLCR && LCR_PATTERNS.some(p => type.includes(p) || vendor.includes(p))) {
@@ -686,6 +730,10 @@ function buildReport({ domain, config, days }) {
       if (!svcHasCET && CET_PATTERNS.some(p => type.includes(p) || vendor.includes(p))) {
         svcHasCET = true;
         cetServices.push(svc.name);
+      }
+      if (!svcHasChangeEvt && isChangeEvt) {
+        svcHasChangeEvt = true;
+        changeEvtServices.push(svc.name);
       }
     }
   }
@@ -708,12 +756,47 @@ function buildReport({ domain, config, days }) {
     routed_services: (eo._routedServiceIds || []).length,
   }));
 
-  // ── Incident workflows ───────────────────────────────────────────────────
-  const wfItems = config.incidentWorkflows.map(wf => ({
-    name:          wf.name,
-    step_count:    (wf.steps || []).length,
-    trigger_types: [...new Set((wf.triggers || []).map(t => t.type).filter(Boolean))],
-  }));
+  // ── Incident workflows + collaboration tool detection ────────────────────
+  // Scan both the workflow NAME and each step's action_id + action_configuration.
+  // Workflow names are the most reliable signal (e.g. "Add (Teams/slack) channel to incidents").
+  // Step-level scanning catches cases where the tool appears only in config, not the name.
+  const wfSlack = new Set();
+  const wfTeams = new Set();
+  const wfZoom  = new Set();
+
+  // Extended Teams patterns to catch PD's native Teams integration action IDs.
+  // PD uses action_ids like: pagerduty.create_meeting_with_teams,
+  // create_ms_teams_meeting, ms-teams, etc.
+  const TEAMS_PATTERNS_EXT = [
+    ...TEAMS_PATTERNS,
+    'ms_teams', 'create_meeting_with_teams', 'ms-teams-meeting', 'msteams',
+  ];
+
+  const wfItems = config.incidentWorkflows.map(wf => {
+    const stepSignals = [];
+    // Check the workflow name first — often the most explicit signal.
+    const wfName = (wf.name || '').toLowerCase();
+    if (hasCollabMatch(wfName, SLACK_PATTERNS))       { wfSlack.add(wf.name); stepSignals.push('slack'); }
+    if (hasCollabMatch(wfName, TEAMS_PATTERNS_EXT))   { wfTeams.add(wf.name); stepSignals.push('teams'); }
+    if (hasCollabMatch(wfName, ZOOM_PATTERNS))        { wfZoom.add(wf.name);  stepSignals.push('zoom'); }
+
+    // Also scan each step's action_id and full action_configuration JSON.
+    for (const step of (wf.steps || [])) {
+      const actionId  = (step.action_id || '').toLowerCase();
+      const actionCfg = JSON.stringify(step.action_configuration || {}).toLowerCase();
+      const combined  = actionId + ' ' + actionCfg;
+
+      if (!stepSignals.includes('slack') && hasCollabMatch(combined, SLACK_PATTERNS))       { wfSlack.add(wf.name); stepSignals.push('slack'); }
+      if (!stepSignals.includes('teams') && hasCollabMatch(combined, TEAMS_PATTERNS_EXT))   { wfTeams.add(wf.name); stepSignals.push('teams'); }
+      if (!stepSignals.includes('zoom')  && hasCollabMatch(combined, ZOOM_PATTERNS))        { wfZoom.add(wf.name);  stepSignals.push('zoom'); }
+    }
+    return {
+      name:                wf.name,
+      step_count:          (wf.steps || []).length,
+      trigger_types:       [...new Set((wf.triggers || []).map(t => t.type).filter(Boolean))],
+      collaboration_tools: [...new Set(stepSignals)],
+    };
+  });
 
   // ── Automation actions ───────────────────────────────────────────────────
   const runnerMap = new Map(config.automationRunners.map(r => [r.id, r.name]));
@@ -730,12 +813,30 @@ function buildReport({ domain, config, days }) {
     filter_type: w.filter?.type          || null,
   }));
 
+  // Scan webhook URLs for collaboration tool destinations
+  for (const w of config.webhooks) {
+    const url = (w.delivery_method?.url || '').toLowerCase();
+    if (hasCollabMatch(url, SLACK_PATTERNS))  wfSlack.add(`webhook:${w.description || w.id}`);
+    if (hasCollabMatch(url, TEAMS_PATTERNS))  wfTeams.add(`webhook:${w.description || w.id}`);
+    if (hasCollabMatch(url, ZOOM_PATTERNS))   wfZoom.add(`webhook:${w.description  || w.id}`);
+  }
+
   // ── Extensions ───────────────────────────────────────────────────────────
   const extItems = config.extensions.map(e => ({
     name:           e.name || e.extension_schema?.summary || 'Unknown',
     schema:         e.extension_schema?.summary           || null,
     services_count: (e.extension_objects || []).length,
   }));
+
+  // Scan extensions for collaboration tools
+  for (const e of config.extensions) {
+    const combined = [
+      e.name, e.extension_schema?.summary, e.extension_schema?.key,
+    ].filter(Boolean).join(' ').toLowerCase();
+    if (hasCollabMatch(combined, SLACK_PATTERNS))  wfSlack.add(`extension:${e.name || e.id}`);
+    if (hasCollabMatch(combined, TEAMS_PATTERNS))  wfTeams.add(`extension:${e.name || e.id}`);
+    if (hasCollabMatch(combined, ZOOM_PATTERNS))   wfZoom.add(`extension:${e.name  || e.id}`);
+  }
 
   // ── Response plays ───────────────────────────────────────────────────────
   const rpItems = (config.responsePlays || []).map(rp => ({
@@ -779,10 +880,14 @@ function buildReport({ domain, config, days }) {
       stale_last_n_days:  config.services.length - config.activeServiceIds.size,
       alert_grouping:     alertGrouping,
       integration_types:  integrationTypes,
-      with_live_call_routing:          lcrServices.length,
-      live_call_routing_services:      lcrServices,
-      with_custom_event_transformers:  cetServices.length,
+      with_live_call_routing:            lcrServices.length,
+      live_call_routing_services:        lcrServices,
+      with_custom_event_transformers:    cetServices.length,
       custom_event_transformer_services: cetServices,
+      // Change event integrations — these feed the PD change timeline, NOT incident alerts.
+      // They migrate to incident.io via the Change Events API / catalog, not alert sources.
+      with_change_event_integrations:    changeEvtServices.length,
+      change_event_integration_services: changeEvtServices,
     },
     teams: {
       total: config.teams.length,
@@ -839,6 +944,41 @@ function buildReport({ domain, config, days }) {
     },
     slack_connections: {
       total: (config.slackConnections || []).length,
+    },
+    // Status pages — a distinct migration workstream if present.
+    // incident.io has native Status Pages (public) and stakeholder update features.
+    // Public status pages require content migration + subscriber communication.
+    // Internal dashboards map to incident.io's status page / stakeholder update features.
+    status_pages: {
+      // Public-facing status pages (customer-visible). Require dedicated migration planning:
+      // subscriber list migration, component/service mapping, custom domain setup.
+      public_total: (config.statusPages || []).length,
+      public_items: (config.statusPages || []).map(p => ({
+        name: p.name || p.subdomain || 'Unnamed',
+        type: p.type || null,
+      })),
+      // Internal stakeholder dashboards. Map to incident.io's status update workflows.
+      internal_total: (config.statusDashboards || []).length,
+      internal_items: (config.statusDashboards || []).map(d => ({
+        name: d.name || 'Unnamed',
+      })),
+    },
+    // Collaboration tools detected across workflows, extensions, and webhooks.
+    // These are tools the customer expects their incident platform to integrate with.
+    // incident.io has native (first-class) integrations for all three.
+    collaboration_tools: {
+      slack: {
+        detected: wfSlack.size > 0,
+        sources:  [...wfSlack],
+      },
+      microsoft_teams: {
+        detected: wfTeams.size > 0,
+        sources:  [...wfTeams],
+      },
+      zoom: {
+        detected: wfZoom.size > 0,
+        sources:  [...wfZoom],
+      },
     },
   };
 }
