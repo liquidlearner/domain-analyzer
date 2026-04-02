@@ -70,6 +70,8 @@
 //  -----
 //    --days=N        Lookback period for stale-service detection (default: 90)
 //    --output=FILE   Output JSON filename (default: pd-analysis-DOMAIN-DATE.json)
+//    --token=KEY     PagerDuty API key (skips interactive prompt, useful for CI/scripting)
+//    --subdomain=S   PagerDuty subdomain (skips interactive prompt, useful for CI/scripting)
 //    --yes           Skip the confirmation prompt and start scanning immediately
 //    --no-color      Disable ANSI colour output in the terminal
 //    --help          Show this help text and exit
@@ -96,7 +98,7 @@ const path     = require('path');
 
 const ARGS = (() => {
   const raw = process.argv.slice(2);
-  const result = { days: 90, output: null, yes: false, noColor: false, help: false };
+  const result = { days: 90, output: null, yes: false, noColor: false, help: false, token: null, subdomain: null };
   for (const arg of raw) {
     if (arg === '--help' || arg === '-h')   { result.help    = true; continue; }
     if (arg === '--yes'  || arg === '-y')   { result.yes     = true; continue; }
@@ -104,8 +106,10 @@ const ARGS = (() => {
     const m = arg.match(/^--(\w[\w-]*)(?:=(.+))?$/);
     if (!m) continue;
     const [, key, val] = m;
-    if (key === 'days')   result.days   = parseInt(val, 10) || 90;
-    if (key === 'output') result.output = val || null;
+    if (key === 'days')      result.days      = parseInt(val, 10) || 90;
+    if (key === 'output')    result.output    = val || null;
+    if (key === 'token')     result.token     = val || null;
+    if (key === 'subdomain') result.subdomain = val || null;
   }
   return result;
 })();
@@ -443,36 +447,41 @@ class PagerDutyClient {
    * Fetch the set of service IDs that had at least one incident CREATED in the last N days.
    * Used only for stale-service detection — we do NOT collect incident content.
    *
-   * IMPORTANT: We include all statuses (triggered, acknowledged, resolved).
-   * The PD API default omits "resolved", which causes low-priority incidents (P4/P5)
-   * that close quickly to be invisible — making active services appear stale.
-   * We want "was an incident created on this service in the last N days?" regardless
-   * of priority, urgency, or whether anyone was paged.
+   * We query each service individually with limit=1. This is the only reliable approach:
+   * the batch method (many service_ids in one query) fails because PD returns incidents
+   * newest-first across all services, so a handful of busy services can fill the entire
+   * result page, leaving quieter services — even ones with real incidents — invisible.
    *
-   * We cap at chunk.length results per chunk (one incident per service is enough
-   * to mark it active), keeping this to a single API page per chunk.
+   * Live diagnostic confirmed: 3 busy services claimed all 50 slots in a batch of 50,
+   * missing 8 other services that actually had incidents (11 active, not 3).
    *
-   * With 50 services per chunk, a 672-service domain requires ~14 API calls total.
+   * We include ALL statuses (triggered, acknowledged, resolved) and ALL urgencies so
+   * low-priority P4/P5 incidents (which may never page anyone) still count a service
+   * as active. The question is "was any incident created on this service?" not "did
+   * anyone get paged?"
+   *
+   * With 672 services at 20 concurrent = ~34 batches. Each call returns at most 1
+   * record, so this is fast despite the higher call count.
    */
   async listRecentIncidentServiceIds(serviceIds, days) {
     if (!serviceIds.length) return new Set();
     const since = new Date(Date.now() - days * 86400_000).toISOString();
     const until = new Date().toISOString();
-    const MAX_PER_REQ = 50;
+    const CONCURRENT = 20;
     const seen = new Set();
-    for (let i = 0; i < serviceIds.length; i += MAX_PER_REQ) {
-      const chunk = serviceIds.slice(i, i + MAX_PER_REQ);
-      try {
-        // Include all statuses so resolved incidents count toward service activity.
-        // Without this, the API default (triggered + acknowledged only) misses any
-        // incident that was resolved before we ran the script.
-        const incidents = await this._all('/incidents', 'incidents', {
-          since, until,
-          service_ids: chunk,
-          statuses: ['triggered', 'acknowledged', 'resolved'],
-        }, undefined, chunk.length);
-        incidents.forEach(inc => { if (inc.service?.id) seen.add(inc.service.id); });
-      } catch { /* ignore — stale detection is best-effort */ }
+    for (let i = 0; i < serviceIds.length; i += CONCURRENT) {
+      const batch = serviceIds.slice(i, i + CONCURRENT);
+      await Promise.allSettled(batch.map(async id => {
+        try {
+          const res = await this._request('GET', '/incidents', {
+            since, until,
+            service_ids: [id],
+            statuses: ['triggered', 'acknowledged', 'resolved'],
+            limit: 1,
+          });
+          if ((res.incidents || []).length > 0) seen.add(id);
+        } catch { /* ignore — stale detection is best-effort */ }
+      }));
     }
     return seen;
   }
@@ -1001,13 +1010,19 @@ async function main() {
   log(`${C.dim}and incident IDs from the last ${ARGS.days} days (stale detection only).${C.reset}`);
   log();
 
-  const rawDomain = await prompt('PagerDuty subdomain (e.g. "acme" from acme.pagerduty.com):');
+  const rawDomain = ARGS.subdomain || await prompt('PagerDuty subdomain (e.g. "acme" from acme.pagerduty.com):');
   if (!rawDomain) { err('Domain name is required.'); process.exit(1); }
   const domain = rawDomain.toLowerCase().replace(/\.pagerduty\.com.*$/, '').replace(/\s/g, '');
 
   log();
-  info('Recommended: use a Read-Only API key (PagerDuty → Integrations → API Access Keys).');
-  const apiKey = await promptSecret('PagerDuty API key:');
+  let apiKey;
+  if (ARGS.token) {
+    apiKey = ARGS.token;
+    info('Using API key from --token flag.');
+  } else {
+    info('Recommended: use a Read-Only API key (PagerDuty → Integrations → API Access Keys).');
+    apiKey = await promptSecret('PagerDuty API key:');
+  }
   if (!apiKey) { err('API key is required.'); process.exit(1); }
 
   log();
