@@ -1,0 +1,138 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$comment": "Content schema for the PD migration assessment deck. ALL text fields are authored by Claude — the renderer contains zero business logic. The SE can edit any field before rendering.",
+
+  "meta": {
+    "customer": "string — display name of the company",
+    "domain": "string — PagerDuty subdomain",
+    "date": "string — e.g. '6 April 2026'",
+    "se_name": "string — e.g. 'Chris Bell'",
+    "include_why_slide": "boolean — set false for pure PD displacement where competitive framing isn't needed"
+  },
+
+  "slide1_title": {
+    "customer_display": "string — how the customer name appears on the title slide",
+    "tagline": "string — one short line below the customer name, e.g. 'Migration Assessment' or 'Scoping Overview'"
+  },
+
+  "slide2_environment": {
+    "subtitle": "string — describes the analysis window, e.g. 'pdt-orbitpay · 90-day analysis window'",
+    "stats_top": [
+      {
+        "value": "string — the big number",
+        "label": "string — e.g. 'Total Services'",
+        "sub": "string|null — small subtext, e.g. '237 licensed seats'",
+        "accent": "orange|navy|mid"
+      }
+    ],
+    "stats_bottom": [
+      {
+        "value": "string",
+        "label": "string",
+        "sub": "string|null",
+        "accent": "orange|navy|mid"
+      }
+    ],
+    "context_bar": "string — text inside the navy info bar, e.g. 'Plan: Enterprise · Priorities: P1–P5 · AIOps: 100 services · Event Orchestrations: 25'",
+    "teaser": "string — italic line previewing the next slide, e.g. 'The migration scope is much smaller than this headline — see next slide.'"
+  },
+
+  "slide3_scope": {
+    "subtitle": "string — e.g. 'Services with incidents in the last 90 days vs. dormant services'",
+    "active_count": "string — e.g. '268'",
+    "active_desc": "string — Claude-authored sentence explaining what active means for THIS customer",
+    "active_sub": "string — e.g. 'Across 61 active teams'",
+    "active_cta": "string — e.g. '→ These migrate to incident.io'",
+    "stale_count": "string — e.g. '404'",
+    "stale_desc": "string — Claude-authored sentence framing the stale number positively",
+    "stale_cta": "string — e.g. '→ Archive or decommission'",
+    "stale_note": "string — italic qualification, e.g. '60% stale — validate in Sprint 0 if this is a production account'",
+    "summary_bar": "string — the bottom reframe bar, e.g. 'Real migration scope: 268 active services across 61 teams — the other 404 are a service catalog cleanup opportunity'"
+  },
+
+  "slide4_teams": {
+    "subtitle": "string",
+    "stats": [
+      { "value": "string", "label": "string" }
+    ],
+    "table_rows": [
+      { "team": "string", "active": "string", "stale": "string" }
+    ],
+    "footer": "string — Claude-authored recommendation, e.g. 'Recommended pilot: Release Engineering — 8 active services, no SN dependency, team lead is the champion'"
+  },
+
+  "slide5_shadow": {
+    "subtitle": "string",
+    "rows": [
+      {
+        "icon": "string — single emoji",
+        "label": "string",
+        "badge": "string — compact descriptor, e.g. '248 webhooks' or '✓ Not detected'",
+        "description": "string — Claude-authored explanation of what this means and how it gets handled",
+        "risk": "boolean — true = orange accent, false = green accent"
+      }
+    ]
+  },
+
+  "slide6_sprint": {
+    "subtitle": "string — context for the plan, e.g. '268 active services · 61 teams · ServiceNow · 2 complex workflows · 14 automation actions'",
+    "sprints": [
+      {
+        "label": "string — e.g. 'Sprint 0'",
+        "duration": "string — e.g. '1 week'",
+        "theme": "string — e.g. 'Foundation & Discovery'",
+        "milestone": "string — Claude-authored milestone statement. Should be specific, not generic.",
+        "type": "discovery|pilot|wave|integration|process|automation|cleanup|cutover"
+      }
+    ],
+    "summary_standard": "string — e.g. '11 sprints (31 weeks ≈ 7.5 months)'",
+    "summary_parallel": "string — e.g. '22–25 weeks ≈ 5–6 months (if PD contract deadline applies)'",
+    "summary_note": "string|null — optional caveat, e.g. 'Timeline confirmed in Sprint 0 after shadow integrations are investigated'"
+  },
+
+  "slide7_easy_discussion": {
+    "easy_items": [
+      {
+        "headline": "string — short label",
+        "detail": "string — Claude-authored sentence explaining why it's genuinely easy for THIS customer"
+      }
+    ],
+    "discussion_items": [
+      {
+        "headline": "string — short label",
+        "detail": "string — Claude-authored explanation of what needs resolving and when"
+      }
+    ]
+  },
+
+  "slide8_questions": {
+    "subtitle": "string",
+    "questions": [
+      {
+        "question": "string — the actual question to ask, specific to this customer's data",
+        "why": "string — why this question matters for THIS account, referencing specific numbers where possible"
+      }
+    ]
+  },
+
+  "slide9_why": {
+    "reasons": [
+      {
+        "icon": "string — single emoji",
+        "title": "string",
+        "body": "string — Claude-authored, specific to this customer's situation. References their data where relevant."
+      }
+    ]
+  },
+
+  "slide10_next_steps": {
+    "steps": [
+      {
+        "number": "string",
+        "title": "string — e.g. 'Sprint 0 Kickoff  (1 week)'",
+        "bullets": ["string — Claude-authored, specific to this account"]
+      }
+    ],
+    "cta": "string — e.g. 'Book a kickoff call · incident.io/demo'"
+  }
+}

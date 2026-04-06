@@ -1,0 +1,364 @@
+{
+  "_comment": "Example content.json authored by Claude for the pdt-orbitpay demo account. Every string is Claude-written narrative, not a template extraction. Edit any field and re-run renderer.js to update the deck.",
+
+  "meta": {
+    "customer": "OrbitPay",
+    "domain": "pdt-orbitpay",
+    "date": "6 April 2026",
+    "se_name": "Chris Bell",
+    "include_why_slide": true
+  },
+
+  "slide1_title": {
+    "customer_display": "OrbitPay",
+    "tagline": "Migration Assessment"
+  },
+
+  "slide2_environment": {
+    "subtitle": "pdt-orbitpay  ·  90-day analysis window  ·  Operations Cloud Ultimate",
+    "stats_top": [
+      { "value": "672",  "label": "Total Services",  "sub": null,                    "accent": "navy"   },
+      { "value": "237",  "label": "Total Users",     "sub": "237 licensed seats",    "accent": "orange" },
+      { "value": "214",  "label": "Teams",           "sub": null,                    "accent": "navy"   }
+    ],
+    "stats_bottom": [
+      { "value": "197",  "label": "On-Call Schedules",    "sub": null, "accent": "mid" },
+      { "value": "218",  "label": "Escalation Policies",  "sub": null, "accent": "mid" },
+      { "value": "19",   "label": "Incident Workflows",   "sub": null, "accent": "mid" }
+    ],
+    "context_bar": "Plan: Operations Cloud Ultimate  ·  Priorities: P1–P5  ·  25 Event Orchestrations  ·  AIOps alert grouping on 100 services",
+    "teaser": "The actual migration scope is much smaller than these headline numbers — the next slide explains why."
+  },
+
+  "slide3_scope": {
+    "subtitle": "Services with incidents in the last 90 days vs. services that haven't fired in over three months",
+    "active_count": "268",
+    "active_desc": "268 services have had at least one incident in the last 90 days — these are the services your engineers actually respond to.",
+    "active_sub": "Across 61 active teams",
+    "active_cta": "→  These migrate to incident.io",
+    "stale_count": "404",
+    "stale_desc": "404 services haven't fired a single incident in 90 days. These aren't a migration problem — they're a service catalog cleanup opportunity you've been meaning to do anyway.",
+    "stale_cta": "→  Archive or decommission",
+    "stale_note": "60% stale is high even for a large payments platform. Sprint 0 will validate whether any stale services are silently critical before we lock the scope.",
+    "summary_bar": "Real migration scope: 268 active services across 61 teams — the 404 stale services are candidates for decommission, not migration"
+  },
+
+  "slide4_teams": {
+    "subtitle": "Teams are the migration unit — each wave migrates 10–20 teams together, validated before the next wave begins",
+    "stats": [
+      { "value": "214", "label": "Total teams in PagerDuty" },
+      { "value": "61",  "label": "Teams with active services" },
+      { "value": "4.4", "label": "Avg active services per team" }
+    ],
+    "table_rows": [
+      { "team": "Data and Analytics",          "active": "20", "stale": "0" },
+      { "team": "Developer Platform",           "active": "16", "stale": "0" },
+      { "team": "Core Infrastructure",          "active": "14", "stale": "0" },
+      { "team": "Customer Experience",          "active": "12", "stale": "0" },
+      { "team": "Identity and Access",          "active": "11", "stale": "0" },
+      { "team": "Enterprise Architecture",      "active": "8",  "stale": "0" },
+      { "team": "Payments Platform",            "active": "8",  "stale": "0" },
+      { "team": "Cloud Platform Engineering",   "active": "8",  "stale": "0" },
+      { "team": "Security Operations",          "active": "8",  "stale": "0" },
+      { "team": "Risk and Compliance",          "active": "8",  "stale": "0" }
+    ],
+    "footer": "Recommended pilot: Release Engineering + Business Operations — 15 active services combined, no ServiceNow dependency, and straightforward on-call structure. Start here, stabilise, then expand."
+  },
+
+  "slide5_shadow": {
+    "subtitle": "Integrations and workflows outside the core migration path — each one has a well-understood migration pattern",
+    "rows": [
+      {
+        "icon": "⚙",
+        "label": "ServiceNow",
+        "badge": "248 webhooks",
+        "description": "Workflow-driven (P1/P2 only via 'ServiceNOW INC for P1 and P2'). This is actually the easiest SN migration pattern — it migrates as a single incident.io Workflow action. Sprint 3 is dedicated to validating bidirectional sync before any SN-dependent teams move.",
+        "risk": true
+      },
+      {
+        "icon": "⚡",
+        "label": "Complex Incident Workflows",
+        "badge": "2 workflows (14–15 steps)",
+        "description": "'Declare Major Incident' (15 steps) and 'ops-srmr' (14 steps). Both rebuild in incident.io's Workflow engine. Sprint 5 is reserved for these specifically — incident commanders sign off before any P1 process is considered migrated.",
+        "risk": true
+      },
+      {
+        "icon": "🔗",
+        "label": "Unknown Webhook Destinations",
+        "badge": "112 subscriptions",
+        "description": "112 webhook subscriptions point to eventsender-f81fbd33135c.herokuapp.com. This is the single biggest unknown in the migration — Sprint 0 identifies whether it's a live integration or legacy noise before we lock the sprint plan.",
+        "risk": true
+      },
+      {
+        "icon": "🤖",
+        "label": "Automation Actions",
+        "badge": "14 actions (10 process + 4 script)",
+        "description": "14 automation actions including Aurora DB checks, CX QA diagnostics, and Instant Transfer enrichment. These migrate to incident.io Runbooks. Sprint 7 is dedicated to this — Runbook runner infrastructure needs to be confirmed beforehand.",
+        "risk": true
+      },
+      {
+        "icon": "💬",
+        "label": "Collaboration Tools",
+        "badge": "Slack · Teams · Zoom",
+        "description": "✓ All three detected. incident.io has native first-class integrations for Slack, Teams, and Zoom — not webhook adapters. This actually simplifies migration: PD's webhook-based integrations get replaced by tighter, purpose-built ones.",
+        "risk": false
+      },
+      {
+        "icon": "📄",
+        "label": "Status Pages",
+        "badge": "4 internal dashboards",
+        "description": "✓ No public status pages. 4 internal stakeholder dashboards only — no subscriber list migration needed. incident.io Status Pages covers these without an additional licence.",
+        "risk": false
+      },
+      {
+        "icon": "📞",
+        "label": "Live Call Routing",
+        "badge": "✓ Not detected",
+        "description": "✓ Not detected. Live Call Routing has no direct equivalent in incident.io, so its absence removes a potential migration blocker entirely.",
+        "risk": false
+      }
+    ]
+  },
+
+  "slide6_sprint": {
+    "subtitle": "268 active services  ·  61 active teams  ·  ServiceNow (workflow-driven)  ·  2 complex workflows  ·  14 automation actions  ·  112 unknown webhooks",
+    "sprints": [
+      {
+        "label":    "Sprint 0",
+        "duration": "1 week",
+        "theme":    "Foundation & Discovery",
+        "milestone": "incident.io environment live; eventsender webhook identified; ServiceNow approach confirmed; sprint plan locked",
+        "type":     "discovery"
+      },
+      {
+        "label":    "Sprint 1",
+        "duration": "3 weeks",
+        "theme":    "Pilot — Release Eng + Business Ops",
+        "milestone": "First 15 services live on incident.io; dual-run stable; on-call engineers validated end-to-end",
+        "type":     "pilot"
+      },
+      {
+        "label":    "Sprint 2",
+        "duration": "3 weeks",
+        "theme":    "Wave 1 (~10 teams)",
+        "milestone": "~12 teams migrated; ~60 active services on incident.io; no PD dependency for migrated teams",
+        "type":     "wave"
+      },
+      {
+        "label":    "Sprint 3",
+        "duration": "3 weeks",
+        "theme":    "ServiceNow Integration",
+        "milestone": "P1/P2 → ServiceNow sync validated bidirectionally; SN-dependent teams cleared to migrate",
+        "type":     "integration"
+      },
+      {
+        "label":    "Sprint 4",
+        "duration": "3 weeks",
+        "theme":    "Wave 2 (~12 teams)",
+        "milestone": "~24 teams on incident.io; Risk & Compliance, Identity & Access migrated",
+        "type":     "wave"
+      },
+      {
+        "label":    "Sprint 5",
+        "duration": "3 weeks",
+        "theme":    "Major Incident Process",
+        "milestone": "'Declare Major Incident' and 'ops-srmr' rebuilt and signed off by incident commanders",
+        "type":     "process"
+      },
+      {
+        "label":    "Sprint 6",
+        "duration": "3 weeks",
+        "theme":    "Wave 3 — High-Volume Teams",
+        "milestone": "Data & Analytics (20 svc) and Developer Platform (16 svc) migrated; ~40 teams on incident.io",
+        "type":     "wave"
+      },
+      {
+        "label":    "Sprint 7",
+        "duration": "3 weeks",
+        "theme":    "Automation Runbooks",
+        "milestone": "All 14 automation actions live as incident.io Runbooks; runner infrastructure validated",
+        "type":     "automation"
+      },
+      {
+        "label":    "Sprint 8",
+        "duration": "3 weeks",
+        "theme":    "Wave 4 (~13 teams)",
+        "milestone": "Core Infrastructure, Customer Experience, Security Ops migrated; ~50 teams on incident.io",
+        "type":     "wave"
+      },
+      {
+        "label":    "Sprint 9",
+        "duration": "3 weeks",
+        "theme":    "Wave 5 + Webhook Cleanup",
+        "milestone": "All 61 active teams migrated; eventsender webhook resolved or retired; 268 services on incident.io",
+        "type":     "cleanup"
+      },
+      {
+        "label":    "Sprint 10",
+        "duration": "3 weeks",
+        "theme":    "Cutover",
+        "milestone": "PagerDuty routing disabled. incident.io is the primary platform. Hypercare begins.",
+        "type":     "cutover"
+      }
+    ],
+    "summary_standard": "11 sprints (31 weeks ≈ 7.5 months)",
+    "summary_parallel": "22–25 weeks ≈ 5–6 months",
+    "summary_note": "Final timeline confirmed in Sprint 0 once the eventsender webhook is understood"
+  },
+
+  "slide7_easy_discussion": {
+    "easy_items": [
+      {
+        "headline": "Events API v2 integrations",
+        "detail": "Your alert sources use the modern Events API v2 — clean, direct migration to incident.io. No payload translation needed."
+      },
+      {
+        "headline": "Slack + Teams + Zoom — all native",
+        "detail": "incident.io treats all three as first-class integrations. PD's webhook adapters get replaced with tighter, purpose-built connections."
+      },
+      {
+        "headline": "No Live Call Routing",
+        "detail": "LCR has no direct equivalent in incident.io — its absence removes one of the most common migration blockers we encounter."
+      },
+      {
+        "headline": "25 Event Orchestrations",
+        "detail": "incident.io Alert Routes are a direct equivalent for your 25 event orchestrations. Routing logic maps cleanly without redesign."
+      },
+      {
+        "headline": "P1–P5 severity model",
+        "detail": "Your five priority levels map directly to incident.io Severity. No severity model redesign needed — names, colours, and descriptions carry over."
+      }
+    ],
+    "discussion_items": [
+      {
+        "headline": "112 unknown webhook subscriptions",
+        "detail": "112 webhooks point to eventsender-f81fbd33135c.herokuapp.com. Is this a live integration or old test infrastructure? Sprint 0 answers this before any migration scope is locked."
+      },
+      {
+        "headline": "'Declare Major Incident' workflow (15 steps)",
+        "detail": "This is your most important process rebuild. We need to walk through it step by step with incident commanders before Sprint 5 to surface any hidden dependencies."
+      },
+      {
+        "headline": "ServiceNow — who owns it?",
+        "detail": "The SN integration is workflow-driven (P1/P2 only) — good news on complexity. But Sprint 3 needs the ITSM team in the room, not just the PD admin."
+      },
+      {
+        "headline": "Automation runner infrastructure",
+        "detail": "14 automation actions including DB checks and auto-remediation scripts. We need to confirm what infrastructure the runner has access to before Sprint 7 starts."
+      },
+      {
+        "headline": "100 services on AIOps grouping",
+        "detail": "Are engineers actively relying on intelligent grouping, or did it come on by default? This affects how we position incident.io's noise reduction in the value story."
+      }
+    ]
+  },
+
+  "slide8_questions": {
+    "subtitle": "Tailored to OrbitPay's environment — use as a call guide and check off as you cover them",
+    "questions": [
+      {
+        "question": "\"What happens if PagerDuty goes down for 4 hours?\"",
+        "why": "Always surfaces shadow backup processes and undocumented escalation paths that won't appear in any API export. Never fails to reveal something useful."
+      },
+      {
+        "question": "\"Of your 672 services, how many actually page your engineers week to week?\"",
+        "why": "Validates the 268 active count and often reveals that the real operational scope is even smaller — important before the scope reframe lands."
+      },
+      {
+        "question": "\"What's hitting eventsender-f81fbd33135c.herokuapp.com? Is that a live integration?\"",
+        "why": "112 webhook subscriptions point there. If it's live, it's a migration workstream. If it's legacy noise, we remove it from scope and compress Sprint 9."
+      },
+      {
+        "question": "\"Which team is most excited about moving to incident.io?\"",
+        "why": "Identifies your pilot wave champion. The right first team makes the rollout contagious. The wrong one creates drag that slows every subsequent wave."
+      },
+      {
+        "question": "\"Who owns the ServiceNow integration — your PD admin or the ITSM team?\"",
+        "why": "Sprint 3 needs the right person in the room. Wrong stakeholder in Sprint 3 = blocked sprint, delayed SN-dependent team migrations, timeline slip."
+      },
+      {
+        "question": "\"Can we walk through the 'Declare Major Incident' workflow step by step?\"",
+        "why": "A 15-step workflow rebuilt from memory always misses something. Sprint 5 goes much smoother if incident commanders have co-authored the spec in advance."
+      },
+      {
+        "question": "\"Is your PagerDuty contract up for renewal in the next 12 months?\"",
+        "why": "A contract deadline is the single most effective forcing function for timeline compression. If it exists, it changes the parallel wave conversation entirely."
+      },
+      {
+        "question": "\"Are your engineers actively using the intelligent alert grouping, or did it come on by default?\"",
+        "why": "100 services have AIOps grouping configured. If engineers rely on it daily, that's a strong incident.io selling point. If it's default-on, it's noise in the value story."
+      }
+    ]
+  },
+
+  "slide9_why": {
+    "reasons": [
+      {
+        "icon": "🤖",
+        "title": "AI SRE Agent — included, not add-on",
+        "body": "Your 100 services with intelligent alert grouping map directly to incident.io's AI noise reduction. Same capability — no separate AIOps licence to negotiate."
+      },
+      {
+        "icon": "⚡",
+        "title": "Slack + Teams + Zoom, natively",
+        "body": "You're already on all three. incident.io treats them as first-class integrations — not the webhook adapters PD uses. Fewer moving parts in your incident response stack."
+      },
+      {
+        "icon": "🔧",
+        "title": "Workflow engine built for complexity",
+        "body": "Your two 'Declare Major Incident' workflows (15 and 14 steps) rebuild cleanly. Conditions, branching, ServiceNow triggers, and multi-step automation are all native."
+      },
+      {
+        "icon": "📋",
+        "title": "Runbooks replace Automation Actions",
+        "body": "Your 14 PD Automation Actions — including Aurora DB checks and CX QA diagnostics — migrate to incident.io Runbooks with tighter incident context and better audit trails."
+      },
+      {
+        "icon": "📄",
+        "title": "Status Pages included",
+        "body": "Your 4 internal stakeholder dashboards migrate to incident.io Status Pages at no extra cost. PagerDuty charges premium for status page functionality."
+      },
+      {
+        "icon": "🏁",
+        "title": "Migrations complete faster than you expect",
+        "body": "7shifts: 2 weeks (70 engineers). Trustly: 6 weeks (200 users). When a contract date creates urgency, teams find a way. The parallel wave option exists if you need it."
+      }
+    ]
+  },
+
+  "slide10_next_steps": {
+    "steps": [
+      {
+        "number": "1",
+        "title": "Sprint 0 Kickoff  (1 week)",
+        "bullets": [
+          "Provision incident.io · SSO/SCIM · Terraform scaffolding",
+          "Investigate eventsender.herokuapp.com — live or legacy?",
+          "Get ServiceNow ITSM team contact for Sprint 3",
+          "Final sprint plan locked with scope confirmed"
+        ]
+      },
+      {
+        "number": "2",
+        "title": "Pilot Wave  (3 weeks)",
+        "bullets": [
+          "Release Engineering + Business Ops first",
+          "Alert → incident → escalation → resolution validated end-to-end",
+          "Dual-run: PD stays live for all other teams",
+          "Feedback loop feeds Wave 1 plan"
+        ]
+      },
+      {
+        "number": "3",
+        "title": "Full Migration  (~9 more sprints)",
+        "bullets": [
+          "268 active services across 61 teams on incident.io",
+          "ServiceNow, major incident workflows, automation in dedicated sprints",
+          "Standard 7.5 months · Parallel option 5–6 months",
+          "PagerDuty decommissioned after hypercare"
+        ]
+      }
+    ],
+    "cta": "Book a kickoff call  ·  incident.io/demo  ·  or reply to this deck to get started"
+  }
+}
