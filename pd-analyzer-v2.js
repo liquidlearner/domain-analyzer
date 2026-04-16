@@ -49,7 +49,7 @@
 //    • Per-service event rules (sampled) — GET /services/{id}/rules
 //    • Status pages (public-facing) — GET /status_pages
 //    • Status dashboards (internal) — GET /status_dashboards
-//    • A list of incident IDs from the last N days (default: 90) to flag
+//    • A list of incident IDs from the last N days (default: 365) to flag
 //      stale services (all statuses incl. resolved). Only service IDs are used.
 //
 //  WHAT IS NOT COLLECTED
@@ -73,7 +73,7 @@
 //
 //  FLAGS
 //  -----
-//    --days=N          Lookback period for stale-service detection (default: 90)
+//    --days=N          Lookback period for stale-service detection (default: 365)
 //    --output=FILE     Output JSON filename (default: pd-analysis-DOMAIN-DATE.json)
 //    --rate-limit=N    Max API requests per minute (default: 300, range: 50–900)
 //                      PagerDuty's hard cap is 900/min. The default 300 leaves
@@ -108,7 +108,7 @@ const path     = require('path');
 
 const ARGS = (() => {
   const raw = process.argv.slice(2);
-  const result = { days: 90, output: null, yes: false, noColor: false, help: false, token: null, subdomain: null, rateLimit: 300 };
+  const result = { days: 365, output: null, yes: false, noColor: false, help: false, token: null, subdomain: null, rateLimit: 300 };
   for (const arg of raw) {
     if (arg === '--help' || arg === '-h')   { result.help    = true; continue; }
     if (arg === '--yes'  || arg === '-y')   { result.yes     = true; continue; }
@@ -116,7 +116,7 @@ const ARGS = (() => {
     const m = arg.match(/^--(\w[\w-]*)(?:=(.+))?$/);
     if (!m) continue;
     const [, key, val] = m;
-    if (key === 'days')        result.days       = parseInt(val, 10) || 90;
+    if (key === 'days')        result.days       = parseInt(val, 10) || 365;
     if (key === 'output')      result.output     = val || null;
     if (key === 'token')       result.token      = val || null;
     if (key === 'subdomain')   result.subdomain  = val || null;
@@ -139,7 +139,7 @@ USAGE
   node pd-analyzer-v2.js [OPTIONS]
 
 OPTIONS
-  --days=N          Lookback period for stale-service detection (default: 90)
+  --days=N          Lookback period for stale-service detection (default: 365)
   --output=FILE     Output JSON filename (default: pd-analysis-DOMAIN-DATE.json)
   --rate-limit=N    Max API requests per minute (default: 300, max: 900)
   --yes             Skip confirmation prompt
@@ -333,7 +333,7 @@ class PagerDutyClient {
   async listTeams()               { return this._all('/teams', 'teams'); }
   async listSchedules()           { return this._all('/schedules', 'schedules', { include: ['schedule_layers','users','teams'] }); }
   async listEscalationPolicies()  { try { return await this._all('/escalation_policies', 'escalation_policies'); } catch { return []; } }
-  async listUsers()               { try { return await this._all('/users', 'users'); } catch { return []; } }
+  async listUsers()               { try { return await this._all('/users', 'users', {}, undefined, undefined, 25); } catch (e) { process.stderr.write(`[WARN] listUsers failed: ${e.message}\n`); return []; } }
   async listBusinessServices()    { try { return await this._all('/business_services', 'business_services'); } catch { return []; } }
   async listServiceDependencies() { try { return await this._all('/service_dependencies/technical_services', 'relationships'); } catch { return []; } }
 
@@ -656,10 +656,17 @@ class PagerDutyClient {
 
   async _withRetry(fn, tries = 0, delay = 1000) {
     const res = await fn();
-    if (res.status !== 429) return res;
-    if (tries >= 8) throw new Error('Rate limited — max retries exceeded');
-    await new Promise(r => setTimeout(r, Math.min(delay * 2, 30_000)));
-    return this._withRetry(fn, tries + 1, delay * 2);
+    if (res.status === 429) {
+      if (tries >= 8) throw new Error('Rate limited — max retries exceeded');
+      await new Promise(r => setTimeout(r, Math.min(delay * 2, 30_000)));
+      return this._withRetry(fn, tries + 1, delay * 2);
+    }
+    if ([500, 502, 503, 504].includes(res.status)) {
+      if (tries >= 3) return res; // give up, let caller handle
+      await new Promise(r => setTimeout(r, Math.min(delay * 2, 10_000)));
+      return this._withRetry(fn, tries + 1, delay * 2);
+    }
+    return res;
   }
 
   async _throttle() {
@@ -671,16 +678,16 @@ class PagerDutyClient {
     }
   }
 
-  async _all(path, key, params = {}, onPage, max) {
+  async _all(path, key, params = {}, onPage, max, pageSize = 100) {
     const all = [];
     let offset = 0;
     let more = true;
     while (more) {
-      const res = await this._request('GET', path, { ...params, limit: 100, offset });
+      const res = await this._request('GET', path, { ...params, limit: pageSize, offset });
       const items = res[key] || [];
       all.push(...items);
       more = res.more === true;
-      offset += 100;
+      offset += pageSize;
       if (max && all.length >= max) break;
       if (onPage) onPage(all.length, more);
     }
@@ -735,8 +742,14 @@ async function fetchConfig(client, days, onProgress) {
   // ── Phase 1: All independent fetches in parallel ─────────────────────────
   // None of these depend on each other's results, so fire them all concurrently.
   // Wall-clock time is dominated by the slowest single paginating fetch
-  // (typically users or schedules on large accounts) rather than their sum.
+  // (typically schedules on large accounts) rather than their sum.
   // On a 672-service account this typically reduces Phase 1 from ~90s to ~20s.
+  //
+  // NOTE: listUsers() is intentionally excluded from this batch and runs as an
+  // isolated sequential fetch in Phase 1b below. On large accounts the combined
+  // burst from 22 concurrent paginating calls (each spawning sub-requests) can
+  // cause PD to 429 the /users call, and the silent catch returns [] with no
+  // log entry. Running it alone after the batch settles guarantees it succeeds.
   report('Phase 1: Fetching all account configuration in parallel...');
 
   const [
@@ -744,7 +757,6 @@ async function fetchConfig(client, days, onProgress) {
     rawTeams,
     schedules,
     escalationPolicies,
-    users,
     rawBusinessServices,
     serviceDeps,
     extensions,
@@ -768,7 +780,6 @@ async function fetchConfig(client, days, onProgress) {
     client.listTeams(),
     client.listSchedules(),
     client.listEscalationPolicies(),
-    client.listUsers(),
     client.listBusinessServices(),
     client.listServiceDependencies(),
     client.listExtensions(),
@@ -789,7 +800,35 @@ async function fetchConfig(client, days, onProgress) {
     client.listAlertGroupingSettings(),
   ]);
 
-  report(`Phase 1 complete — ${services.length} services · ${rawTeams.length} teams · ${users.length} users`);
+  report(`Phase 1 complete — ${services.length} services · ${rawTeams.length} teams`);
+
+  // ── Phase 1b: Users — isolated sequential fetch ───────────────────────────
+  // Runs after the Phase 1 burst has fully settled so /users gets a clear lane.
+  // On large accounts with 200+ services generating sub-requests, /users was
+  // consistently 429'd and silently returning [] when batched with Phase 1.
+  report('Phase 1b: Fetching users...');
+  let users = await client.listUsers();
+  report(`Phase 1b complete — ${users.length} users`);
+
+  // Fallback: if /users 500'd or returned empty, extract unique users from
+  // schedule layer data (already fetched with include[]=users). This captures
+  // all on-call responders — the most important cohort for migration planning.
+  if (users.length === 0 && schedules.length > 0) {
+    report('Phase 1b fallback: extracting users from schedule data...');
+    const userMap = new Map();
+    for (const sched of schedules) {
+      for (const layer of (sched.schedule_layers || [])) {
+        for (const u of (layer.users || [])) {
+          if (u.id && !userMap.has(u.id)) userMap.set(u.id, u);
+        }
+      }
+      for (const u of (sched.users || [])) {
+        if (u.id && !userMap.has(u.id)) userMap.set(u.id, u);
+      }
+    }
+    users = Array.from(userMap.values());
+    report(`Phase 1b fallback complete — ${users.length} users extracted from ${schedules.length} schedules`);
+  }
 
   // ── Phase 2: Dependent fetches — all parallel with each other ────────────
   // These need Phase 1 data but are independent of each other.
